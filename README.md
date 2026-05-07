@@ -38,7 +38,7 @@ Statuses are `active`, `paused`, `budgetLimited`, and `complete`. When a goal re
 
 When a goal exists, pi keeps the normal footer information and renders the Codex-style goal indicator on the bottom-right footer line: `Pursuing goal (...)`, `Goal paused (/goal resume)`, `Goal unmet (...)`, or `Goal achieved (...)`. The older below-editor goal widget is cleared. Each active turn receives a system prompt requiring a completion audit before the agent may call `update_goal` with `status: "complete"`.
 
-On session start, an active goal queues a continuation prompt modeled after Codex's goal continuation behavior. The objective is wrapped as untrusted user data so it does not become higher-priority instructions.
+On session start, after `/goal <objective>`, after `/goal resume`, and after every agent turn that leaves the goal `active`, the extension queues a continuation prompt modeled after Codex's goal continuation behavior. The objective is wrapped as untrusted user data so it does not become higher-priority instructions.
 
 ## Development
 

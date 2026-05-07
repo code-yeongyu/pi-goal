@@ -6,6 +6,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozech
 import { Type } from "typebox";
 
 import { parseGoalCommand } from "./goal/command.js";
+import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWhenIdle } from "./goal/continuation.js";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt, buildGoalSystemPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
@@ -156,7 +157,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", async (_event, ctx) => {
 		const goal = await readGoal(goalStoreRef(ctx));
 		updateGoalUi(ctx, goal);
-		if (goal?.status === "active" && ctx.isIdle() && !ctx.hasPendingMessages()) {
+		if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
 			pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
 		}
 	});
@@ -179,6 +180,10 @@ export default function (pi: ExtensionAPI): void {
 		updateGoalUi(ctx, goal);
 		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
 			pi.sendUserMessage(buildBudgetLimitedPrompt(goal), { deliverAs: "followUp" });
+			return;
+		}
+		if (shouldQueueGoalContinuationAfterAgentEnd(goal, ctx.hasPendingMessages())) {
+			pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
 		}
 	});
 
@@ -203,7 +208,7 @@ async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objecti
 }
 
 function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
-	if (goal.status === "active" && ctx.isIdle() && !ctx.hasPendingMessages()) {
+	if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
 		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
 	}
 }
