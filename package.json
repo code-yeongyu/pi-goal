@@ -1,6 +1,6 @@
 {
 	"name": "pi-goal",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Persistent goal tracking for pi-coding-agent with Codex-style goal tools, TUI status, and continuation prompts.",
 	"type": "module",
 	"license": "MIT",
@@ -35,7 +35,8 @@
 		"typecheck": "tsgo --noEmit",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
-		"check": "tsgo --noEmit && biome check ."
+		"no-excuse": "bun --install=fallback ./scripts/check-no-excuse-rules.ts src test scripts",
+		"check": "tsgo --noEmit && biome check . && npm run no-excuse"
 	},
 	"peerDependencies": {
 		"@mariozechner/pi-ai": "*",

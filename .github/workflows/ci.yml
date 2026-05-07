@@ -34,10 +34,13 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Check (tsgo + biome)
+      - name: Check (tsgo + biome + no-excuse)
         run: npm run check
 
       - name: Unit tests
