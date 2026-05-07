@@ -29,8 +29,8 @@ Goals are stored in `.pi/goal.json` in the current project. The file is intentio
 
 ## Agent Tools
 
-- `create_goal({ objective, tokenBudget? })` creates a new active goal.
-- `update_goal({ objective?, status?, tokenBudget? })` updates status, budget, or objective. Changing the objective starts a fresh logical goal and resets usage.
+- `create_goal({ objective, token_budget? })` creates a new active goal. This follows Codex's model-facing schema.
+- `update_goal({ status: "complete" })` only marks the current goal complete. Pause, resume, budget-limited, and clear transitions are user/system controlled.
 - `get_goal({})` returns the current goal summary.
 
 Statuses are `active`, `paused`, `budget_limited`, and `complete`. When a goal reaches its token budget, the extension marks it `budget_limited` and queues a prompt asking the agent to summarize remaining work instead of silently continuing.
@@ -47,7 +47,8 @@ On session start, an active goal queues a continuation prompt modeled after Code
 npm test
 npm run typecheck
 npm run check
+npm run no-excuse
 npm pack --dry-run
 ```
 
-The implementation is strict TypeScript and mirrors sibling pi extension metadata, CI, and package layout.
+The implementation is strict TypeScript and mirrors sibling pi extension metadata, CI, and package layout. `npm run check` runs `tsgo --noEmit`, `biome check .`, and the TypeScript no-excuse checker.

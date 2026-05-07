@@ -1,14 +1,12 @@
-import type { AssistantMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
-import { formatGoalForTool } from "./goal/format.js";
+import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt, buildGoalSystemPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
 import type { TokenUsageSnapshot } from "./goal/types.js";
-import { GOAL_STATUS_VALUES } from "./goal/types.js";
+import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
-import { parseGoalStatus } from "./goal/validation.js";
 
 const HELP = `Goal commands:
 /goal set <objective> [--token-budget N]
@@ -21,6 +19,12 @@ const HELP = `Goal commands:
 Agent tools:
 create_goal, update_goal, get_goal`;
 
+type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
+type AssistantUsageMessage = {
+	role: "assistant";
+	usage: Record<string, unknown>;
+};
+
 export default function (pi: ExtensionAPI): void {
 	let agentStartedAt: number | null = null;
 
@@ -31,60 +35,65 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "create_goal",
 		label: "Create Goal",
-		description: "Create a persistent thread goal. Fails if a goal already exists.",
-		promptSnippet: "Create a persistent goal when the user explicitly asks to track a long-running objective.",
+		description:
+			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if a goal exists; use update_goal only for status.",
+		promptSnippet:
+			"Create a persistent goal only when explicitly requested by the user or higher-priority instructions.",
 		promptGuidelines: [
-			"Use create_goal only when the user explicitly asks for goal tracking or a persistent long-running objective.",
+			"Create a goal only when explicitly requested by the user or system/developer instructions.",
 			"Do not create goals for ordinary one-turn tasks.",
 		],
 		parameters: Type.Object({
-			objective: Type.String({ description: "The concrete objective to pursue." }),
-			tokenBudget: Type.Optional(Type.Number({ description: "Optional positive token budget." })),
+			objective: Type.String({
+				description:
+					"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
+			}),
+			token_budget: Type.Optional(
+				Type.Integer({ description: "Optional positive token budget for the new active goal." }),
+			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if ((await readGoal(ctx.cwd)) !== null) {
-				return toolText("A goal already exists. Use update_goal or /goal clear first.", true);
+				return toolText(
+					"cannot create a new goal because this thread already has a goal; use update_goal only when the existing goal is complete",
+					true,
+				);
 			}
-			const goal = await createGoal(ctx.cwd, params.objective, params.tokenBudget);
+			const goal = await createGoal(ctx.cwd, params.objective, params.token_budget);
 			updateGoalUi(ctx, goal);
-			return toolText(`Created goal.\n${formatGoalForTool(goal)}`);
+			return toolText(formatGoalToolResponse(goal, false));
 		},
 	});
 
 	pi.registerTool({
 		name: "update_goal",
 		label: "Update Goal",
-		description: "Update the persistent thread goal status, objective, or token budget.",
-		promptSnippet: "Update a persistent goal when it is complete, paused, budget-limited, or needs a revised budget.",
+		description:
+			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
+		promptSnippet: "Mark the persistent goal complete only after verifying no required work remains.",
 		promptGuidelines: [
 			"Only mark a goal complete after auditing the actual current state against the user's objective.",
-			"Use status budget_limited when token budget, not task completion, is the reason to pause.",
+			"Do not call update_goal because the budget is exhausted or because work is stopping for another reason.",
 		],
 		parameters: Type.Object({
-			objective: Type.Optional(Type.String({ description: "Replacement objective. Resets usage if changed." })),
-			status: Type.Optional(
-				Type.Union(
-					GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
-					{
-						description: "New goal status.",
-					},
-				),
-			),
-			tokenBudget: Type.Optional(
-				Type.Union([Type.Number(), Type.Null()], {
-					description: "Positive token budget, or null to remove it.",
-				}),
+			status: Type.Union(
+				COMPLETABLE_GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
+				{
+					description:
+						"Required. Set to complete only when the objective is achieved and no required work remains.",
+				},
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const status = params.status === undefined ? undefined : parseGoalStatus(params.status);
-			const goal = await updateGoal(ctx.cwd, {
-				objective: params.objective,
-				status,
-				tokenBudget: params.tokenBudget,
-			});
+			if (params.status !== "complete") {
+				return toolText(
+					"update_goal can only mark the existing goal complete; pause, resume, and budget-limited status changes are controlled by the user or system",
+					true,
+				);
+			}
+			const goal = await updateGoal(ctx.cwd, { status: "complete" });
 			updateGoalUi(ctx, goal);
-			return toolText(`Updated goal.\n${formatGoalForTool(goal)}`);
+			return toolText(formatGoalToolResponse(goal, true));
 		},
 	});
 
@@ -97,7 +106,7 @@ export default function (pi: ExtensionAPI): void {
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const goal = await readGoal(ctx.cwd);
 			updateGoalUi(ctx, goal);
-			return toolText(formatGoalForTool(goal));
+			return toolText(formatGoalToolResponse(goal, false));
 		},
 	});
 
@@ -120,7 +129,7 @@ export default function (pi: ExtensionAPI): void {
 							? await updateGoal(ctx.cwd, { objective: parsed.objective, tokenBudget: parsed.tokenBudget })
 							: await createGoal(ctx.cwd, parsed.objective, parsed.tokenBudget ?? undefined);
 						updateGoalUi(ctx, goal);
-						ctx.ui.notify(`Goal set.\n${formatGoalForTool(goal)}`, "info");
+						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 						return;
 					}
 					case "pause":
@@ -129,10 +138,7 @@ export default function (pi: ExtensionAPI): void {
 						const status = command === "pause" ? "paused" : command === "resume" ? "active" : "complete";
 						const goal = await updateGoal(ctx.cwd, { status });
 						updateGoalUi(ctx, goal);
-						ctx.ui.notify(
-							`Goal ${status === "active" ? "resumed" : status}.\n${formatGoalForTool(goal)}`,
-							"info",
-						);
+						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 						return;
 					}
 					case "clear": {
@@ -185,7 +191,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 }
 
-function toolText(text: string, isError = false) {
+function toolText(text: string, isError = false): GoalToolResult {
 	return { content: [{ type: "text" as const, text }], details: {}, isError };
 }
 
@@ -205,19 +211,28 @@ function parseSetArgs(raw: string): { objective: string; tokenBudget: number | n
 function collectAssistantUsage(messages: unknown[]): TokenUsageSnapshot {
 	const usage: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 	for (const message of messages) {
-		if (!isAssistantMessage(message)) continue;
-		usage.input += message.usage.input || 0;
-		usage.output += message.usage.output || 0;
-		usage.cacheRead += message.usage.cacheRead || 0;
-		usage.cacheWrite += message.usage.cacheWrite || 0;
-		usage.totalTokens += message.usage.totalTokens || 0;
+		if (!isAssistantUsageMessage(message)) continue;
+		usage.input += numericUsageField(message.usage, "input");
+		usage.output += numericUsageField(message.usage, "output");
+		usage.cacheRead += numericUsageField(message.usage, "cacheRead");
+		usage.cacheWrite += numericUsageField(message.usage, "cacheWrite");
+		usage.totalTokens += numericUsageField(message.usage, "totalTokens");
 	}
 	return usage;
 }
 
-function isAssistantMessage(message: unknown): message is AssistantMessage {
-	if (!message || typeof message !== "object") return false;
-	return (message as { role?: unknown }).role === "assistant";
+function isAssistantUsageMessage(message: unknown): message is AssistantUsageMessage {
+	if (!isRecord(message)) return false;
+	return message["role"] === "assistant" && isRecord(message["usage"]);
+}
+
+function numericUsageField(usage: Record<string, unknown>, key: string): number {
+	const value = usage[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
 }
 
 function errorMessage(error: unknown): string {

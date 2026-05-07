@@ -1,4 +1,4 @@
-import type { Goal, GoalStatus } from "./types.js";
+import type { Goal, GoalStatus, GoalToolResponse, GoalToolSnapshot } from "./types.js";
 
 export function formatGoalElapsedSeconds(value: number): string {
 	const seconds = Math.max(0, Math.trunc(value));
@@ -58,6 +58,46 @@ export function formatGoalForTool(goal: Goal | null): string {
 	];
 	if (goal.completedAt) lines.push(`Completed at: ${goal.completedAt}`);
 	return lines.join("\n");
+}
+
+export function goalToolResponse(goal: Goal | null, includeCompletionBudgetReport: boolean): GoalToolResponse {
+	return {
+		goal: goal === null ? null : goalToolSnapshot(goal),
+		remainingTokens: remainingTokens(goal),
+		completionBudgetReport: includeCompletionBudgetReport ? completionBudgetReport(goal) : null,
+	};
+}
+
+export function formatGoalToolResponse(goal: Goal | null, includeCompletionBudgetReport: boolean): string {
+	return JSON.stringify(goalToolResponse(goal, includeCompletionBudgetReport), null, 2);
+}
+
+function goalToolSnapshot(goal: Goal): GoalToolSnapshot {
+	return {
+		id: goal.id,
+		objective: goal.objective,
+		status: goal.status,
+		tokenBudget: goal.tokenBudget ?? null,
+		tokensUsed: goal.tokensUsed,
+		timeUsedSeconds: goal.timeUsedSeconds,
+		createdAt: goal.createdAt,
+		updatedAt: goal.updatedAt,
+		completedAt: goal.completedAt ?? null,
+	};
+}
+
+function remainingTokens(goal: Goal | null): number | null {
+	if (goal?.tokenBudget === undefined) return null;
+	return Math.max(0, goal.tokenBudget - goal.tokensUsed);
+}
+
+function completionBudgetReport(goal: Goal | null): string | null {
+	if (goal?.status !== "complete") return null;
+	const parts: string[] = [];
+	if (goal.tokenBudget !== undefined) parts.push(`tokens used: ${goal.tokensUsed} of ${goal.tokenBudget}`);
+	if (goal.timeUsedSeconds > 0) parts.push(`time used: ${goal.timeUsedSeconds} seconds`);
+	if (parts.length === 0) return null;
+	return `Goal achieved. Report final budget usage to the user: ${parts.join("; ")}.`;
 }
 
 function formatOneDecimal(value: number): string {

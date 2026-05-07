@@ -14,7 +14,7 @@ Create a goal:
 ```ts
 create_goal({
 	objective: "Ship the pi-goal extension",
-	tokenBudget: 50000,
+	token_budget: 50000,
 });
 ```
 
@@ -32,7 +32,7 @@ update_goal({
 });
 ```
 
-Supported statuses are `active`, `paused`, `budget_limited`, and `complete`.
+`update_goal` only accepts `complete`. User-facing `/goal` commands control pause, resume, budget-limited, and clear transitions.
 
 ## Completion Rule
 

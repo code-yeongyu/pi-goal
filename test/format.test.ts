@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatGoalElapsedSeconds, goalUsageSummary } from "../src/goal/format.js";
+import { formatGoalElapsedSeconds, goalToolResponse, goalUsageSummary } from "../src/goal/format.js";
 import type { Goal } from "../src/goal/types.js";
 
 describe("goal display formatting", () => {
@@ -20,6 +20,24 @@ describe("goal display formatting", () => {
 		expect(goalUsageSummary(testGoal({ tokenBudget: 50_000, tokensUsed: 63_876 }))).toBe(
 			"Objective: Port /goal as a pi extension Time: 2m. Tokens: 63.9K/50K.",
 		);
+	});
+
+	it("returns Codex-style tool response budget report for completed budgeted goals", () => {
+		expect(
+			goalToolResponse(
+				testGoal({
+					status: "complete",
+					tokenBudget: 10_000,
+					tokensUsed: 3_250,
+					timeUsedSeconds: 75,
+				}),
+				true,
+			),
+		).toMatchObject({
+			remainingTokens: 6_750,
+			completionBudgetReport:
+				"Goal achieved. Report final budget usage to the user: tokens used: 3250 of 10000; time used: 75 seconds.",
+		});
 	});
 });
 

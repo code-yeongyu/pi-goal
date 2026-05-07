@@ -36,13 +36,15 @@ export async function createGoal(cwd: string, objective: string, tokenBudget?: n
 		id: randomUUID(),
 		objective: normalizedObjective,
 		status: "active",
-		tokenBudget,
 		tokensUsed: 0,
 		timeUsedSeconds: 0,
 		createdAt: now,
 		updatedAt: now,
 		lastStartedAt: now,
 	};
+	if (tokenBudget !== undefined) {
+		goal.tokenBudget = tokenBudget;
+	}
 	await writeGoal(cwd, goal);
 	return goal;
 }
@@ -56,27 +58,48 @@ export async function updateGoal(cwd: string, update: GoalUpdate): Promise<Goal>
 	const now = new Date().toISOString();
 	const replacesObjective = objective !== current.objective;
 	const status = update.status ?? (replacesObjective ? "active" : current.status);
-	const next: Goal = replacesObjective
-		? {
-				id: randomUUID(),
-				objective,
-				status,
-				tokenBudget: tokenBudget === null ? undefined : (tokenBudget ?? current.tokenBudget),
-				tokensUsed: 0,
-				timeUsedSeconds: 0,
-				createdAt: now,
-				updatedAt: now,
-				lastStartedAt: status === "active" ? now : undefined,
-			}
-		: {
-				...current,
-				objective,
-				status,
-				updatedAt: now,
-				tokenBudget: tokenBudget === null ? undefined : (tokenBudget ?? current.tokenBudget),
-				lastStartedAt: status === "active" && current.status !== "active" ? now : current.lastStartedAt,
-				completedAt: status === "complete" ? (current.completedAt ?? now) : undefined,
-			};
+
+	if (replacesObjective) {
+		const next: Goal = {
+			id: randomUUID(),
+			objective,
+			status,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const replacementBudget = tokenBudget === null ? undefined : (tokenBudget ?? current.tokenBudget);
+		if (replacementBudget !== undefined) next.tokenBudget = replacementBudget;
+		if (status === "active") next.lastStartedAt = now;
+		await writeGoal(cwd, next);
+		return next;
+	}
+
+	const next: Goal = {
+		...current,
+		objective,
+		status,
+		updatedAt: now,
+	};
+
+	if (tokenBudget === null) {
+		delete next.tokenBudget;
+	} else if (tokenBudget !== undefined) {
+		next.tokenBudget = tokenBudget;
+	}
+
+	if (status === "active" && current.status !== "active") {
+		next.lastStartedAt = now;
+	} else if (status !== "active") {
+		delete next.lastStartedAt;
+	}
+
+	if (status === "complete") {
+		next.completedAt = current.completedAt ?? now;
+	} else {
+		delete next.completedAt;
+	}
 
 	await writeGoal(cwd, next);
 	return next;
@@ -105,20 +128,59 @@ export async function accountGoalUsage(
 		updatedAt: now,
 		status: goal.tokenBudget !== undefined && tokensUsed >= goal.tokenBudget ? "budget_limited" : goal.status,
 	};
-	if (next.status === "budget_limited") next.lastStartedAt = undefined;
+	if (next.status === "budget_limited") delete next.lastStartedAt;
 	await writeGoal(cwd, next);
 	return next;
 }
 
 function parseGoalFile(raw: string): GoalFile {
-	const parsed = JSON.parse(raw) as Partial<GoalFile>;
-	if (parsed.version !== STORE_VERSION) throw new Error("unsupported goal store version");
+	const parsed: unknown = JSON.parse(raw);
+	if (!isRecord(parsed)) throw new Error("goal store must be a JSON object");
+	if (parsed["version"] !== STORE_VERSION) throw new Error("unsupported goal store version");
+	const goal = parsed["goal"];
+	if (goal !== null && !isGoal(goal)) throw new Error("goal store contains an invalid goal");
 	return {
 		version: STORE_VERSION,
-		goal: parsed.goal ?? null,
+		goal,
 	};
 }
 
 function isMissingFile(error: unknown): boolean {
-	return error instanceof Error && "code" in error && error.code === "ENOENT";
+	return isErrorWithCode(error) && error.code === "ENOENT";
+}
+
+function isErrorWithCode(error: unknown): error is Error & { code: string } {
+	return error instanceof Error && "code" in error && typeof error.code === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isGoal(value: unknown): value is Goal {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value["id"] === "string" &&
+		typeof value["objective"] === "string" &&
+		isGoalStatus(value["status"]) &&
+		(value["tokenBudget"] === undefined || isPositiveSafeInteger(value["tokenBudget"])) &&
+		isNonNegativeSafeInteger(value["tokensUsed"]) &&
+		isNonNegativeSafeInteger(value["timeUsedSeconds"]) &&
+		typeof value["createdAt"] === "string" &&
+		typeof value["updatedAt"] === "string" &&
+		(value["lastStartedAt"] === undefined || typeof value["lastStartedAt"] === "string") &&
+		(value["completedAt"] === undefined || typeof value["completedAt"] === "string")
+	);
+}
+
+function isGoalStatus(value: unknown): value is Goal["status"] {
+	return value === "active" || value === "paused" || value === "budget_limited" || value === "complete";
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && typeof value === "number" && value > 0;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
 }
