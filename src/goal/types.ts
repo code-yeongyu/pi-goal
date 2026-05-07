@@ -5,8 +5,8 @@ export type GoalStatus = (typeof GOAL_STATUS_VALUES)[number];
 export type CompletableGoalStatus = (typeof COMPLETABLE_GOAL_STATUS_VALUES)[number];
 
 export type GoalStoreRef = {
-	sessionDir: string;
-	sessionId: string;
+	baseDir: string;
+	threadId: string;
 };
 
 export type Goal = {

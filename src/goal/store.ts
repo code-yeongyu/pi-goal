@@ -7,7 +7,7 @@ import { validateObjective, validateTokenBudget } from "./validation.js";
 const STORE_VERSION = 1;
 
 export function goalFilePath(ref: GoalStoreRef): string {
-	return join(ref.sessionDir, "extensions", "pi-goal", `${encodeURIComponent(ref.sessionId)}.json`);
+	return join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.json`);
 }
 
 export async function readGoal(ref: GoalStoreRef): Promise<Goal | null> {
@@ -34,7 +34,7 @@ export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudg
 	const now = nowSeconds();
 	const goal: Goal = {
 		id: randomUUID(),
-		threadId: ref.sessionId,
+		threadId: ref.threadId,
 		objective: normalizedObjective,
 		status: "active",
 		tokensUsed: 0,
@@ -64,7 +64,7 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 	if (replacesGoal) {
 		const next: Goal = {
 			id: randomUUID(),
-			threadId: ref.sessionId,
+			threadId: ref.threadId,
 			objective,
 			status,
 			tokensUsed: 0,

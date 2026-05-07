@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -200,10 +204,24 @@ export default function (pi: ExtensionAPI): void {
 }
 
 function goalStoreRef(ctx: ExtensionContext): GoalStoreRef {
+	const sessionFile = ctx.sessionManager.getSessionFile();
+	const baseDir =
+		sessionFile === undefined
+			? join(agentDir(), "extensions", "pi-goal", "no-session", cwdStoreKey(ctx.cwd))
+			: join(ctx.sessionManager.getSessionDir(), "extensions", "pi-goal");
+
 	return {
-		sessionDir: ctx.sessionManager.getSessionDir(),
-		sessionId: ctx.sessionManager.getSessionId(),
+		baseDir,
+		threadId: ctx.sessionManager.getSessionId(),
 	};
+}
+
+function agentDir(): string {
+	return process.env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
+}
+
+function cwdStoreKey(cwd: string): string {
+	return createHash("sha256").update(cwd).digest("hex").slice(0, 24);
 }
 
 function toolText(text: string, isError = false): GoalToolResult {

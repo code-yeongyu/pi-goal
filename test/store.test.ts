@@ -79,8 +79,8 @@ describe("goal store", () => {
 	});
 });
 
-async function tempStore(sessionId = "thread-test"): Promise<GoalStoreRef> {
+async function tempStore(threadId = "thread-test"): Promise<GoalStoreRef> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-goal-"));
 	tempDirs.push(dir);
-	return { sessionDir: dir, sessionId };
+	return { baseDir: join(dir, "extensions", "pi-goal"), threadId };
 }
