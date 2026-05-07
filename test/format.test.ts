@@ -34,6 +34,12 @@ describe("goal display formatting", () => {
 				true,
 			),
 		).toMatchObject({
+			goal: {
+				threadId: "thread-1",
+				status: "complete",
+				tokenBudget: 10_000,
+				createdAt: 1_777_766_400,
+			},
 			remainingTokens: 6_750,
 			completionBudgetReport:
 				"Goal achieved. Report final budget usage to the user: tokens used: 3250 of 10000; time used: 75 seconds.",
@@ -44,12 +50,13 @@ describe("goal display formatting", () => {
 function testGoal(overrides: Partial<Goal> = {}): Goal {
 	return {
 		id: "goal-1",
+		threadId: "thread-1",
 		objective: "Port /goal as a pi extension",
 		status: "active",
 		tokensUsed: 0,
 		timeUsedSeconds: 120,
-		createdAt: "2026-05-07T00:00:00.000Z",
-		updatedAt: "2026-05-07T00:00:00.000Z",
+		createdAt: 1_777_766_400,
+		updatedAt: 1_777_766_400,
 		...overrides,
 	};
 }

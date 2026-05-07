@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt, buildGoalSystemPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
-import type { TokenUsageSnapshot } from "./goal/types.js";
+import type { GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
@@ -29,7 +29,7 @@ export default function (pi: ExtensionAPI): void {
 	let agentStartedAt: number | null = null;
 
 	async function refreshUi(ctx: ExtensionContext): Promise<void> {
-		updateGoalUi(ctx, await readGoal(ctx.cwd));
+		updateGoalUi(ctx, await readGoal(goalStoreRef(ctx)));
 	}
 
 	pi.registerTool({
@@ -43,23 +43,27 @@ export default function (pi: ExtensionAPI): void {
 			"Create a goal only when explicitly requested by the user or system/developer instructions.",
 			"Do not create goals for ordinary one-turn tasks.",
 		],
-		parameters: Type.Object({
-			objective: Type.String({
-				description:
-					"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
-			}),
-			token_budget: Type.Optional(
-				Type.Integer({ description: "Optional positive token budget for the new active goal." }),
-			),
-		}),
+		parameters: Type.Object(
+			{
+				objective: Type.String({
+					description:
+						"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
+				}),
+				token_budget: Type.Optional(
+					Type.Integer({ description: "Optional positive token budget for the new active goal." }),
+				),
+			},
+			{ additionalProperties: false },
+		),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if ((await readGoal(ctx.cwd)) !== null) {
+			const ref = goalStoreRef(ctx);
+			if ((await readGoal(ref)) !== null) {
 				return toolText(
 					"cannot create a new goal because this thread already has a goal; use update_goal only when the existing goal is complete",
 					true,
 				);
 			}
-			const goal = await createGoal(ctx.cwd, params.objective, params.token_budget);
+			const goal = await createGoal(ref, params.objective, params.token_budget);
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal, false));
 		},
@@ -75,15 +79,18 @@ export default function (pi: ExtensionAPI): void {
 			"Only mark a goal complete after auditing the actual current state against the user's objective.",
 			"Do not call update_goal because the budget is exhausted or because work is stopping for another reason.",
 		],
-		parameters: Type.Object({
-			status: Type.Union(
-				COMPLETABLE_GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
-				{
-					description:
-						"Required. Set to complete only when the objective is achieved and no required work remains.",
-				},
-			),
-		}),
+		parameters: Type.Object(
+			{
+				status: Type.Union(
+					COMPLETABLE_GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
+					{
+						description:
+							"Required. Set to complete only when the objective is achieved and no required work remains.",
+					},
+				),
+			},
+			{ additionalProperties: false },
+		),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.status !== "complete") {
 				return toolText(
@@ -91,7 +98,7 @@ export default function (pi: ExtensionAPI): void {
 					true,
 				);
 			}
-			const goal = await updateGoal(ctx.cwd, { status: "complete" });
+			const goal = await updateGoal(goalStoreRef(ctx), { status: "complete" });
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal, true));
 		},
@@ -102,9 +109,9 @@ export default function (pi: ExtensionAPI): void {
 		label: "Get Goal",
 		description: "Read the current persistent thread goal and usage accounting.",
 		promptSnippet: "Read the current persistent goal before continuing or auditing long-running work.",
-		parameters: Type.Object({}),
+		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const goal = await readGoal(ctx.cwd);
+			const goal = await readGoal(goalStoreRef(ctx));
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal, false));
 		},
@@ -118,16 +125,17 @@ export default function (pi: ExtensionAPI): void {
 				switch (command) {
 					case "":
 					case "status": {
-						const goal = await readGoal(ctx.cwd);
+						const goal = await readGoal(goalStoreRef(ctx));
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(formatGoalForTool(goal), goal ? "info" : "warning");
 						return;
 					}
 					case "set": {
 						const parsed = parseSetArgs(rest);
-						const goal = (await readGoal(ctx.cwd))
-							? await updateGoal(ctx.cwd, { objective: parsed.objective, tokenBudget: parsed.tokenBudget })
-							: await createGoal(ctx.cwd, parsed.objective, parsed.tokenBudget ?? undefined);
+						const ref = goalStoreRef(ctx);
+						const goal = (await readGoal(ref))
+							? await updateGoal(ref, { objective: parsed.objective, tokenBudget: parsed.tokenBudget })
+							: await createGoal(ref, parsed.objective, parsed.tokenBudget ?? undefined);
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 						return;
@@ -136,13 +144,13 @@ export default function (pi: ExtensionAPI): void {
 					case "resume":
 					case "complete": {
 						const status = command === "pause" ? "paused" : command === "resume" ? "active" : "complete";
-						const goal = await updateGoal(ctx.cwd, { status });
+						const goal = await updateGoal(goalStoreRef(ctx), { status });
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 						return;
 					}
 					case "clear": {
-						const cleared = await clearGoal(ctx.cwd);
+						const cleared = await clearGoal(goalStoreRef(ctx));
 						updateGoalUi(ctx, null);
 						ctx.ui.notify(cleared ? "Goal cleared." : "No goal was set.", cleared ? "info" : "warning");
 						return;
@@ -157,7 +165,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		const goal = await readGoal(ctx.cwd);
+		const goal = await readGoal(goalStoreRef(ctx));
 		updateGoalUi(ctx, goal);
 		if (goal?.status === "active" && ctx.isIdle() && !ctx.hasPendingMessages()) {
 			pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
@@ -165,7 +173,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		const goal = await readGoal(ctx.cwd);
+		const goal = await readGoal(goalStoreRef(ctx));
 		if (!goal || goal.status !== "active") return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n\n${buildGoalSystemPrompt(goal)}` };
 	});
@@ -178,9 +186,9 @@ export default function (pi: ExtensionAPI): void {
 		const startedAt = agentStartedAt;
 		agentStartedAt = null;
 		const elapsedSeconds = startedAt === null ? 0 : Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-		const goal = await accountGoalUsage(ctx.cwd, collectAssistantUsage(event.messages), elapsedSeconds);
+		const goal = await accountGoalUsage(goalStoreRef(ctx), collectAssistantUsage(event.messages), elapsedSeconds);
 		updateGoalUi(ctx, goal);
-		if (goal?.status === "budget_limited" && !ctx.hasPendingMessages()) {
+		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
 			pi.sendUserMessage(buildBudgetLimitedPrompt(goal), { deliverAs: "followUp" });
 		}
 	});
@@ -189,6 +197,13 @@ export default function (pi: ExtensionAPI): void {
 		await refreshUi(ctx);
 		updateGoalUi(ctx, null);
 	});
+}
+
+function goalStoreRef(ctx: ExtensionContext): GoalStoreRef {
+	return {
+		sessionDir: ctx.sessionManager.getSessionDir(),
+		sessionId: ctx.sessionManager.getSessionId(),
+	};
 }
 
 function toolText(text: string, isError = false): GoalToolResult {

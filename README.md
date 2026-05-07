@@ -1,6 +1,6 @@
 # pi-goal
 
-Persistent `/goal` support for pi. The extension ports the useful parts of Codex goal mode into a pi package: a project-local goal store, TUI status/widget, goal-aware system steering, continuation prompts, token/time accounting, and agent-callable tools.
+Persistent `/goal` support for pi. The extension ports the useful parts of Codex goal mode into a pi package: a session-scoped goal store, TUI status/widget, goal-aware system steering, continuation prompts, token/time accounting, and agent-callable tools.
 
 ## Installation
 
@@ -25,7 +25,7 @@ pi -e ./src/index.ts
 /goal clear
 ```
 
-Goals are stored in `.pi/goal.json` in the current project. The file is intentionally local state and is ignored by this repository.
+Goals are stored under Pi's active session directory, keyed by session id. That means `PI_CODING_AGENT_DIR=$HOME/.senpi/agent` keeps goal state under `~/.senpi/agent/...` even when pi is launched from a workspace such as `~/local-workspaces/senpi-mono`.
 
 ## Agent Tools
 
@@ -33,7 +33,7 @@ Goals are stored in `.pi/goal.json` in the current project. The file is intentio
 - `update_goal({ status: "complete" })` only marks the current goal complete. Pause, resume, budget-limited, and clear transitions are user/system controlled.
 - `get_goal({})` returns the current goal summary.
 
-Statuses are `active`, `paused`, `budget_limited`, and `complete`. When a goal reaches its token budget, the extension marks it `budget_limited` and queues a prompt asking the agent to summarize remaining work instead of silently continuing.
+Statuses are `active`, `paused`, `budgetLimited`, and `complete`. When a goal reaches its token budget, the extension marks it `budgetLimited` and queues a prompt asking the agent to summarize remaining work instead of silently continuing.
 
 ## TUI Behavior
 

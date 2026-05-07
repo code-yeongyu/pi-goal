@@ -44,4 +44,4 @@ Before marking a goal complete, audit the actual current state:
 4. Treat uncertainty as incomplete.
 5. Call `update_goal({ status: "complete" })` only when no required work remains.
 
-Use `budget_limited` when the reason to stop is budget exhaustion rather than completion.
+Use budget-limited status when the reason to stop is budget exhaustion rather than completion.

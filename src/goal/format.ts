@@ -32,7 +32,7 @@ export function goalStatusLabel(status: GoalStatus): string {
 			return "active";
 		case "paused":
 			return "paused";
-		case "budget_limited":
+		case "budgetLimited":
 			return "limited by budget";
 		case "complete":
 			return "complete";
@@ -56,7 +56,7 @@ export function formatGoalForTool(goal: Goal | null): string {
 		`Time used: ${formatGoalElapsedSeconds(goal.timeUsedSeconds)}`,
 		`Tokens used: ${formatTokensCompact(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokensCompact(goal.tokenBudget)}`}`,
 	];
-	if (goal.completedAt) lines.push(`Completed at: ${goal.completedAt}`);
+	if (goal.completedAt) lines.push(`Completed at: ${new Date(goal.completedAt * 1000).toISOString()}`);
 	return lines.join("\n");
 }
 
@@ -73,17 +73,17 @@ export function formatGoalToolResponse(goal: Goal | null, includeCompletionBudge
 }
 
 function goalToolSnapshot(goal: Goal): GoalToolSnapshot {
-	return {
-		id: goal.id,
+	const snapshot: GoalToolSnapshot = {
+		threadId: goal.threadId,
 		objective: goal.objective,
 		status: goal.status,
-		tokenBudget: goal.tokenBudget ?? null,
 		tokensUsed: goal.tokensUsed,
 		timeUsedSeconds: goal.timeUsedSeconds,
 		createdAt: goal.createdAt,
 		updatedAt: goal.updatedAt,
-		completedAt: goal.completedAt ?? null,
 	};
+	if (goal.tokenBudget !== undefined) snapshot.tokenBudget = goal.tokenBudget;
+	return snapshot;
 }
 
 function remainingTokens(goal: Goal | null): number | null {

@@ -47,7 +47,7 @@ function goalStatusUsage(goal: Goal): string | null {
 				: `${formatTokensCompact(goal.tokensUsed)} / ${formatTokensCompact(goal.tokenBudget)}`;
 		case "paused":
 			return null;
-		case "budget_limited":
+		case "budgetLimited":
 			return goal.tokenBudget === undefined
 				? null
 				: `${formatTokensCompact(goal.tokensUsed)} / ${formatTokensCompact(goal.tokenBudget)} tokens`;
@@ -64,7 +64,7 @@ function goalStatusColor(status: GoalStatus): ThemeColor {
 			return "accent";
 		case "paused":
 			return "muted";
-		case "budget_limited":
+		case "budgetLimited":
 			return "warning";
 		case "complete":
 			return "success";

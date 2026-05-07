@@ -1,20 +1,26 @@
-export const GOAL_STATUS_VALUES = ["active", "paused", "budget_limited", "complete"] as const;
+export const GOAL_STATUS_VALUES = ["active", "paused", "budgetLimited", "complete"] as const;
 export const COMPLETABLE_GOAL_STATUS_VALUES = ["complete"] as const;
 
 export type GoalStatus = (typeof GOAL_STATUS_VALUES)[number];
 export type CompletableGoalStatus = (typeof COMPLETABLE_GOAL_STATUS_VALUES)[number];
 
+export type GoalStoreRef = {
+	sessionDir: string;
+	sessionId: string;
+};
+
 export type Goal = {
 	id: string;
+	threadId: string;
 	objective: string;
 	status: GoalStatus;
 	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
-	createdAt: string;
-	updatedAt: string;
-	lastStartedAt?: string;
-	completedAt?: string;
+	createdAt: number;
+	updatedAt: number;
+	lastStartedAt?: number;
+	completedAt?: number;
 };
 
 export type GoalFile = {
@@ -37,15 +43,14 @@ export type GoalUpdate = {
 };
 
 export type GoalToolSnapshot = {
-	id: string;
+	threadId: string;
 	objective: string;
 	status: GoalStatus;
-	tokenBudget: number | null;
+	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
-	createdAt: string;
-	updatedAt: string;
-	completedAt: string | null;
+	createdAt: number;
+	updatedAt: number;
 };
 
 export type GoalToolResponse = {

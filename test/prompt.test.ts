@@ -23,11 +23,12 @@ describe("goal prompts", () => {
 function testGoal(objective: string): Goal {
 	return {
 		id: "goal-1",
+		threadId: "thread-1",
 		objective,
 		status: "active",
 		tokensUsed: 10,
 		timeUsedSeconds: 20,
-		createdAt: "2026-05-07T00:00:00.000Z",
-		updatedAt: "2026-05-07T00:00:00.000Z",
+		createdAt: 1_777_766_400,
+		updatedAt: 1_777_766_400,
 	};
 }
