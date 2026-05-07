@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { parseGoalCommand } from "./goal/command.js";
 import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWhenIdle } from "./goal/continuation.js";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
-import { buildBudgetLimitedPrompt, buildContinuationPrompt, buildGoalSystemPrompt } from "./goal/prompt.js";
+import { buildBudgetLimitedPrompt, buildContinuationPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
 import type { Goal, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
@@ -16,6 +16,8 @@ import { updateGoalUi } from "./goal/ui.js";
 
 const GOAL_USAGE = "Usage: /goal <objective>";
 const GOAL_USAGE_HINT = "Example: /goal improve benchmark coverage";
+const GOAL_CONTINUATION_MESSAGE_TYPE = "pi-goal-continuation";
+const GOAL_BUDGET_LIMIT_MESSAGE_TYPE = "pi-goal-budget-limit";
 
 type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
 type AssistantUsageMessage = {
@@ -35,12 +37,6 @@ export default function (pi: ExtensionAPI): void {
 		label: "Create Goal",
 		description:
 			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if a goal exists; use update_goal only for status.",
-		promptSnippet:
-			"Create a persistent goal only when explicitly requested by the user or higher-priority instructions.",
-		promptGuidelines: [
-			"Create a goal only when explicitly requested by the user or system/developer instructions.",
-			"Do not create goals for ordinary one-turn tasks.",
-		],
 		parameters: Type.Object(
 			{
 				objective: Type.String({
@@ -72,11 +68,6 @@ export default function (pi: ExtensionAPI): void {
 		label: "Update Goal",
 		description:
 			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
-		promptSnippet: "Mark the persistent goal complete only after verifying no required work remains.",
-		promptGuidelines: [
-			"Only mark a goal complete after auditing the actual current state against the user's objective.",
-			"Do not call update_goal because the budget is exhausted or because work is stopping for another reason.",
-		],
 		parameters: Type.Object(
 			{
 				status: Type.Union(
@@ -105,8 +96,8 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "get_goal",
 		label: "Get Goal",
-		description: "Read the current persistent thread goal and usage accounting.",
-		promptSnippet: "Read the current persistent goal before continuing or auditing long-running work.",
+		description:
+			"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const goal = await readGoal(goalStoreRef(ctx));
@@ -158,14 +149,8 @@ export default function (pi: ExtensionAPI): void {
 		const goal = await readGoal(goalStoreRef(ctx));
 		updateGoalUi(ctx, goal);
 		if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
-			pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
+			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
 		}
-	});
-
-	pi.on("before_agent_start", async (event, ctx) => {
-		const goal = await readGoal(goalStoreRef(ctx));
-		if (!goal || goal.status !== "active") return undefined;
-		return { systemPrompt: `${event.systemPrompt}\n\n${buildGoalSystemPrompt(goal)}` };
 	});
 
 	pi.on("agent_start", () => {
@@ -179,11 +164,11 @@ export default function (pi: ExtensionAPI): void {
 		const goal = await accountGoalUsage(goalStoreRef(ctx), collectAssistantUsage(event.messages), elapsedSeconds);
 		updateGoalUi(ctx, goal);
 		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
-			pi.sendUserMessage(buildBudgetLimitedPrompt(goal), { deliverAs: "followUp" });
+			queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
 			return;
 		}
 		if (shouldQueueGoalContinuationAfterAgentEnd(goal, ctx.hasPendingMessages())) {
-			pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
+			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
 		}
 	});
 
@@ -209,8 +194,12 @@ async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objecti
 
 function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
 	if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
-		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
+		queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
 	}
+}
+
+function queueHiddenGoalPrompt(pi: ExtensionAPI, customType: string, content: string): void {
+	pi.sendMessage({ customType, content, display: false }, { triggerTurn: true, deliverAs: "followUp" });
 }
 
 function goalStoreRef(ctx: ExtensionContext): GoalStoreRef {
