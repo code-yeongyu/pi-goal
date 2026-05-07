@@ -122,7 +122,7 @@ export async function accountGoalUsage(
 	const goal = await readGoal(ref);
 	if (!goal || goal.status !== "active") return goal;
 
-	const tokensUsed = goal.tokensUsed + usage.totalTokens;
+	const tokensUsed = goal.tokensUsed + goalTokenDeltaForUsage(usage);
 	const now = nowSeconds();
 	const next: Goal = {
 		...goal,
@@ -134,6 +134,11 @@ export async function accountGoalUsage(
 	if (next.status === "budgetLimited") delete next.lastStartedAt;
 	await writeGoal(ref, next);
 	return next;
+}
+
+function goalTokenDeltaForUsage(usage: TokenUsageSnapshot): number {
+	const nonCachedInput = Math.max(0, usage.input - usage.cacheRead);
+	return nonCachedInput + Math.max(0, usage.output);
 }
 
 function parseGoalFile(raw: string): GoalFile {

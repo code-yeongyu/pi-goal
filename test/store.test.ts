@@ -31,7 +31,7 @@ describe("goal store", () => {
 	it("replaces changed objectives and preserves usage for status updates", async () => {
 		const ref = await tempStore();
 		const first = await createGoal(ref, "Original");
-		await accountGoalUsage(ref, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 25 }, 70);
+		await accountGoalUsage(ref, { input: 23, output: 2, cacheRead: 0, cacheWrite: 4, totalTokens: 25 }, 70);
 
 		const paused = await updateGoal(ref, { status: "paused" });
 		expect(paused.id).toBe(first.id);
@@ -57,13 +57,26 @@ describe("goal store", () => {
 		expect(resumed.status).toBe("active");
 	});
 
+	it("counts non-cached input plus output tokens like Codex", async () => {
+		const ref = await tempStore();
+		await createGoal(ref, "Budgeted");
+
+		const goal = await accountGoalUsage(
+			ref,
+			{ input: 100, output: 20, cacheRead: 70, cacheWrite: 0, totalTokens: 999 },
+			0,
+		);
+
+		expect(goal).toMatchObject({ tokensUsed: 50 });
+	});
+
 	it("marks active goals budgetLimited when accounting reaches budget", async () => {
 		const ref = await tempStore();
 		await createGoal(ref, "Budgeted", 50);
 
 		const goal = await accountGoalUsage(
 			ref,
-			{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 51 },
+			{ input: 31, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 51 },
 			4,
 		);
 
