@@ -1,6 +1,6 @@
 {
 	"name": "pi-goal",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"description": "Persistent goal tracking for pi-coding-agent with Codex-style goal tools, TUI footer, and continuation prompts.",
 	"type": "module",
 	"license": "MIT",
@@ -24,9 +24,6 @@
 	"pi": {
 		"extensions": [
 			"./src/index.ts"
-		],
-		"skills": [
-			"./SKILL.md"
 		]
 	},
 	"scripts": {
