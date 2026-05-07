@@ -5,23 +5,16 @@ import { join } from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
+import { parseGoalCommand } from "./goal/command.js";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt, buildGoalSystemPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
-import type { GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
+import type { Goal, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
-const HELP = `Goal commands:
-/goal set <objective> [--token-budget N]
-/goal status
-/goal pause
-/goal resume
-/goal complete
-/goal clear
-
-Agent tools:
-create_goal, update_goal, get_goal`;
+const GOAL_USAGE = "Usage: /goal <objective>";
+const GOAL_USAGE_HINT = "Example: /goal improve benchmark coverage";
 
 type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
 type AssistantUsageMessage = {
@@ -122,35 +115,29 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("goal", {
-		description: "Set, inspect, pause, resume, complete, or clear the persistent goal",
+		description: "Set, inspect, pause, resume, or clear the persistent goal",
 		handler: async (rawArgs, ctx) => {
-			const [command, rest] = splitCommand(rawArgs.trim());
+			const command = parseGoalCommand(rawArgs);
 			try {
-				switch (command) {
-					case "":
-					case "status": {
+				switch (command.kind) {
+					case "show": {
 						const goal = await readGoal(goalStoreRef(ctx));
 						updateGoalUi(ctx, goal);
-						ctx.ui.notify(formatGoalForTool(goal), goal ? "info" : "warning");
+						ctx.ui.notify(
+							goal === null ? `${GOAL_USAGE}\n${GOAL_USAGE_HINT}` : formatGoalForTool(goal),
+							goal ? "info" : "warning",
+						);
 						return;
 					}
-					case "set": {
-						const parsed = parseSetArgs(rest);
-						const ref = goalStoreRef(ctx);
-						const goal = (await readGoal(ref))
-							? await updateGoal(ref, { objective: parsed.objective, tokenBudget: parsed.tokenBudget })
-							: await createGoal(ref, parsed.objective, parsed.tokenBudget ?? undefined);
-						updateGoalUi(ctx, goal);
-						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
+					case "setObjective": {
+						await setGoalObjective(pi, ctx, command.objective);
 						return;
 					}
-					case "pause":
-					case "resume":
-					case "complete": {
-						const status = command === "pause" ? "paused" : command === "resume" ? "active" : "complete";
-						const goal = await updateGoal(goalStoreRef(ctx), { status });
+					case "setStatus": {
+						const goal = await updateGoal(goalStoreRef(ctx), { status: command.status });
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
+						queueGoalContinuation(pi, ctx, goal);
 						return;
 					}
 					case "clear": {
@@ -159,8 +146,6 @@ export default function (pi: ExtensionAPI): void {
 						ctx.ui.notify(cleared ? "Goal cleared." : "No goal was set.", cleared ? "info" : "warning");
 						return;
 					}
-					default:
-						ctx.ui.notify(HELP, "info");
 				}
 			} catch (error) {
 				ctx.ui.notify(errorMessage(error), "error");
@@ -203,6 +188,26 @@ export default function (pi: ExtensionAPI): void {
 	});
 }
 
+async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objective: string): Promise<void> {
+	const ref = goalStoreRef(ctx);
+	const current = await readGoal(ref);
+	if (current !== null && ctx.hasUI) {
+		const shouldReplace = await ctx.ui.confirm("Replace goal?", `New objective: ${objective}`);
+		if (!shouldReplace) return;
+	}
+
+	const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective });
+	updateGoalUi(ctx, goal);
+	ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
+	queueGoalContinuation(pi, ctx, goal);
+}
+
+function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
+	if (goal.status === "active" && ctx.isIdle() && !ctx.hasPendingMessages()) {
+		pi.sendUserMessage(buildContinuationPrompt(goal), { deliverAs: "followUp" });
+	}
+}
+
 function goalStoreRef(ctx: ExtensionContext): GoalStoreRef {
 	const sessionFile = ctx.sessionManager.getSessionFile();
 	const baseDir =
@@ -226,19 +231,6 @@ function cwdStoreKey(cwd: string): string {
 
 function toolText(text: string, isError = false): GoalToolResult {
 	return { content: [{ type: "text" as const, text }], details: {}, isError };
-}
-
-function splitCommand(raw: string): [string, string] {
-	const match = raw.match(/^(\S+)(?:\s+([\s\S]*))?$/);
-	if (!match) return ["", ""];
-	return [match[1] ?? "", match[2] ?? ""];
-}
-
-function parseSetArgs(raw: string): { objective: string; tokenBudget: number | null } {
-	const tokenBudgetMatch = raw.match(/\s+--token-budget\s+(\d+)\s*$/);
-	const objective = (tokenBudgetMatch ? raw.slice(0, tokenBudgetMatch.index) : raw).trim();
-	const tokenBudget = tokenBudgetMatch ? Number.parseInt(tokenBudgetMatch[1] ?? "", 10) : null;
-	return { objective, tokenBudget };
 }
 
 function collectAssistantUsage(messages: unknown[]): TokenUsageSnapshot {

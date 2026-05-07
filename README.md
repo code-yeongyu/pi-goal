@@ -17,11 +17,10 @@ pi -e ./src/index.ts
 ## Commands
 
 ```bash
-/goal set <objective> [--token-budget N]
-/goal status
+/goal <objective>
+/goal
 /goal pause
 /goal resume
-/goal complete
 /goal clear
 ```
 
