@@ -2,18 +2,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readGoal } from "../src/goal/store.js";
 import type { GoalStoreRef } from "../src/goal/types.js";
 import { goalFooterIndicator } from "../src/goal/ui.js";
 import piGoalExtension from "../src/index.js";
 
-type ToolResult = {
-	content: { type: "text"; text: string }[];
-};
+type ToolResult = AgentToolResult<unknown>;
 
 type GoalContext = {
-	hasUI: false;
+	hasUI: boolean;
+	ui: MockUi;
 	cwd: string;
 	sessionManager: {
 		getSessionFile(): string;
@@ -35,24 +35,37 @@ type RegisteredTool = {
 	): Promise<ToolResult>;
 };
 
+type RegisteredCommand = {
+	handler(args: string, ctx: GoalContext): Promise<void>;
+};
+
 type EventPayload = {
 	type: string;
+	reason?: string;
 	messages?: unknown[];
 };
 
 type EventHandler = (event: EventPayload, ctx: GoalContext) => unknown | Promise<unknown>;
 
-type GoalExtensionApi = {
-	registerTool(tool: RegisteredTool): void;
-	registerCommand(name: string, options: { handler(args: string, ctx: GoalContext): Promise<void> }): void;
-	on(event: string, handler: EventHandler): void;
-	sendMessage(
-		message: { customType: string; content: string; display: boolean },
-		options: Record<string, unknown>,
-	): void;
+type NotifyType = "info" | "warning" | "error";
+type SelectCall = { title: string; options: string[] };
+type ConfirmCall = { title: string; message: string };
+type NotifyCall = { message: string; type: NotifyType | undefined };
+type MockUi = {
+	selectCalls: SelectCall[];
+	confirmCalls: ConfirmCall[];
+	notifyCalls: NotifyCall[];
+	select(title: string, options: string[]): Promise<string | undefined>;
+	confirm(title: string, message: string): Promise<boolean>;
+	notify(message: string, type?: NotifyType): void;
+	setWidget(key: string, content: string[] | undefined): void;
+	setStatus(key: string, text: string | undefined): void;
+	setFooter(factory: unknown): void;
 };
-
-type GoalExtensionFactory = (pi: GoalExtensionApi) => void;
+type SentMessage = {
+	message: { customType: string; content: string; display: boolean };
+	options: Record<string, unknown>;
+};
 
 const tempDirs: string[] = [];
 
@@ -124,26 +137,132 @@ describe("pi-goal extension accounting", () => {
 	});
 });
 
+describe("pi-goal extension command UI parity", () => {
+	afterEach(async () => {
+		vi.useRealTimers();
+		await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+	});
+
+	it("shows Codex-style usage text for a bare /goal without a goal", async () => {
+		const harness = createHarness();
+		const ui = createMockUi();
+		const ctx = await createContext("thread-show-no-goal", { hasUI: true, ui });
+
+		await harness.command("goal").handler("", ctx);
+
+		expect(ui.notifyCalls).toContainEqual({
+			message: "Usage: /goal <objective>\nNo goal is currently set.",
+			type: "warning",
+		});
+	});
+
+	it("shows Codex-style clear feedback when no goal exists", async () => {
+		const harness = createHarness();
+		const ui = createMockUi();
+		const ctx = await createContext("thread-clear-no-goal", { hasUI: true, ui });
+
+		await harness.command("goal").handler("clear", ctx);
+
+		expect(ui.notifyCalls).toContainEqual({
+			message: "No goal to clear\nThis thread does not currently have a goal.",
+			type: "warning",
+		});
+	});
+
+	it("asks with Codex-style choices before replacing an existing goal", async () => {
+		const harness = createHarness();
+		const ui = createMockUi({ selectResponses: ["Cancel"] });
+		const ctx = await createContext("thread-replace-cancel", { hasUI: true, ui });
+		await harness.tool("create_goal").execute("create-goal", { objective: "Original" }, undefined, undefined, ctx);
+
+		await harness.command("goal").handler("Replacement", ctx);
+
+		expect(ui.selectCalls).toContainEqual({
+			title: "Replace goal?\nNew objective: Replacement",
+			options: ["Replace current goal", "Cancel"],
+		});
+		expect(ui.confirmCalls).toHaveLength(0);
+		expect(await readGoal(refForContext(ctx))).toMatchObject({ objective: "Original" });
+	});
+
+	it("replaces an existing goal only after the replace choice is selected", async () => {
+		const harness = createHarness();
+		const ui = createMockUi({ selectResponses: ["Replace current goal"] });
+		const ctx = await createContext("thread-replace-confirm", { hasUI: true, ui });
+		await harness.tool("create_goal").execute("create-goal", { objective: "Original" }, undefined, undefined, ctx);
+
+		await harness.command("goal").handler("Replacement", ctx);
+
+		expect(await readGoal(refForContext(ctx))).toMatchObject({
+			objective: "Replacement",
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+		});
+		expect(ui.notifyCalls.at(-1)).toMatchObject({
+			message: expect.stringContaining("Goal active\nObjective: Replacement"),
+			type: "info",
+		});
+	});
+
+	it("prompts to resume a paused goal when a session is resumed", async () => {
+		const harness = createHarness();
+		const ui = createMockUi({ selectResponses: ["Resume goal"] });
+		const ctx = await createContext("thread-resume-paused", { hasUI: true, ui });
+		await harness.tool("create_goal").execute("create-goal", { objective: "Paused work" }, undefined, undefined, ctx);
+		await harness.command("goal").handler("pause", ctx);
+
+		await harness.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
+
+		expect(ui.selectCalls).toContainEqual({
+			title: "Resume paused goal?\nGoal: Paused work",
+			options: ["Resume goal", "Leave paused"],
+		});
+		expect(await readGoal(refForContext(ctx))).toMatchObject({ objective: "Paused work", status: "active" });
+		expect(harness.sentMessages).toHaveLength(1);
+		expect(harness.sentMessages[0]?.message.customType).toBe("pi-goal-continuation");
+	});
+
+	it("does not prompt to resume a paused goal on non-resume session starts", async () => {
+		const harness = createHarness();
+		const ui = createMockUi({ selectResponses: ["Resume goal"] });
+		const ctx = await createContext("thread-startup-paused", { hasUI: true, ui });
+		await harness.tool("create_goal").execute("create-goal", { objective: "Paused work" }, undefined, undefined, ctx);
+		await harness.command("goal").handler("pause", ctx);
+
+		await harness.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+		expect(ui.selectCalls).toHaveLength(0);
+		expect(await readGoal(refForContext(ctx))).toMatchObject({ objective: "Paused work", status: "paused" });
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("leaves a paused resumed-session goal paused when that choice is selected", async () => {
+		const harness = createHarness();
+		const ui = createMockUi({ selectResponses: ["Leave paused"] });
+		const ctx = await createContext("thread-leave-paused", { hasUI: true, ui });
+		await harness.tool("create_goal").execute("create-goal", { objective: "Paused work" }, undefined, undefined, ctx);
+		await harness.command("goal").handler("pause", ctx);
+
+		await harness.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
+
+		expect(await readGoal(refForContext(ctx))).toMatchObject({ objective: "Paused work", status: "paused" });
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+});
+
 function createHarness(): {
 	tool(name: string): RegisteredTool;
+	command(name: string): RegisteredCommand;
 	emit(event: string, payload: EventPayload, ctx: GoalContext): Promise<void>;
+	sentMessages: SentMessage[];
 } {
 	const tools = new Map<string, RegisteredTool>();
+	const commands = new Map<string, RegisteredCommand>();
 	const handlers = new Map<string, EventHandler[]>();
-	const installGoalExtension = piGoalExtension as GoalExtensionFactory;
+	const sentMessages: SentMessage[] = [];
 
-	installGoalExtension({
-		registerTool(tool) {
-			tools.set(tool.name, tool);
-		},
-		registerCommand() {},
-		on(event, handler) {
-			const eventHandlers = handlers.get(event) ?? [];
-			eventHandlers.push(handler);
-			handlers.set(event, eventHandlers);
-		},
-		sendMessage() {},
-	});
+	piGoalExtension(createExtensionApi(tools, commands, handlers, sentMessages));
 
 	return {
 		tool(name) {
@@ -151,27 +270,148 @@ function createHarness(): {
 			if (tool === undefined) throw new Error(`tool not registered: ${name}`);
 			return tool;
 		},
+		command(name) {
+			const command = commands.get(name);
+			if (command === undefined) throw new Error(`command not registered: ${name}`);
+			return command;
+		},
 		async emit(event, payload, ctx) {
 			for (const handler of handlers.get(event) ?? []) {
 				await handler(payload, ctx);
 			}
 		},
+		sentMessages,
 	};
 }
 
-async function createContext(threadId: string): Promise<GoalContext> {
+function createExtensionApi(
+	tools: Map<string, RegisteredTool>,
+	commands: Map<string, RegisteredCommand>,
+	handlers: Map<string, EventHandler[]>,
+	sentMessages: SentMessage[],
+): ExtensionAPI {
+	return {
+		on(event, handler) {
+			const eventHandlers = handlers.get(event) ?? [];
+			eventHandlers.push((payload, ctx) => handler(payload as never, ctx as never));
+			handlers.set(event, eventHandlers);
+		},
+		registerTool(tool) {
+			tools.set(tool.name, {
+				name: tool.name,
+				execute(toolCallId, params, signal, onUpdate, ctx) {
+					return tool.execute(toolCallId, params as never, signal, onUpdate, ctx as never);
+				},
+			});
+		},
+		registerCommand(name, options) {
+			commands.set(name, {
+				handler(args, ctx) {
+					return options.handler(args, ctx as never);
+				},
+			});
+		},
+		registerShortcut() {},
+		registerFlag() {},
+		getFlag() {
+			return undefined;
+		},
+		registerMessageRenderer() {},
+		sendMessage(message, options) {
+			sentMessages.push({
+				message: {
+					customType: message.customType,
+					content: String(message.content),
+					display: message.display,
+				},
+				options: options ?? {},
+			});
+		},
+		sendUserMessage() {},
+		appendEntry() {},
+		setSessionName() {},
+		getSessionName() {
+			return undefined;
+		},
+		setLabel() {},
+		async exec() {
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		},
+		getActiveTools() {
+			return [];
+		},
+		getAllTools() {
+			return [];
+		},
+		setActiveTools() {},
+		getCommands() {
+			return [];
+		},
+		async setModel() {
+			return false;
+		},
+		getThinkingLevel() {
+			return "medium";
+		},
+		setThinkingLevel() {},
+		registerProvider() {},
+		unregisterProvider() {},
+		events: {
+			emit() {},
+			on() {
+				return () => {};
+			},
+		},
+	};
+}
+
+type ContextOptions = {
+	hasUI?: boolean;
+	ui?: MockUi;
+	isIdle?: boolean;
+	hasPendingMessages?: boolean;
+};
+
+async function createContext(threadId: string, options: ContextOptions = {}): Promise<GoalContext> {
 	const sessionDir = await mkdtemp(join(tmpdir(), "pi-goal-extension-"));
 	tempDirs.push(sessionDir);
 	return {
-		hasUI: false,
+		hasUI: options.hasUI ?? false,
+		ui: options.ui ?? createMockUi(),
 		cwd: sessionDir,
 		sessionManager: {
 			getSessionFile: () => join(sessionDir, "session.json"),
 			getSessionDir: () => sessionDir,
 			getSessionId: () => threadId,
 		},
-		isIdle: () => true,
-		hasPendingMessages: () => false,
+		isIdle: () => options.isIdle ?? true,
+		hasPendingMessages: () => options.hasPendingMessages ?? false,
+	};
+}
+
+function createMockUi(
+	options: { selectResponses?: (string | undefined)[]; confirmResponses?: boolean[] } = {},
+): MockUi {
+	const selectResponses = [...(options.selectResponses ?? [])];
+	const confirmResponses = [...(options.confirmResponses ?? [])];
+	return {
+		selectCalls: [],
+		confirmCalls: [],
+		notifyCalls: [],
+		async select(title, choices) {
+			this.selectCalls.push({ title, options: choices });
+			return selectResponses.shift();
+		},
+		async confirm(title, message) {
+			this.confirmCalls.push({ title, message });
+			return confirmResponses.shift() ?? false;
+		},
+		notify(message, type) {
+			this.notifyCalls.push({ message, type });
+		},
+		setWidget() {},
+		setStatus() {},
+		setFooter() {},
 	};
 }
 
@@ -184,6 +424,6 @@ function refForContext(ctx: GoalContext): GoalStoreRef {
 
 function toolResultText(result: ToolResult): string {
 	const firstContent = result.content[0];
-	if (firstContent === undefined) throw new Error("tool result had no text content");
+	if (firstContent?.type !== "text") throw new Error("tool result had no text content");
 	return firstContent.text;
 }

@@ -15,9 +15,13 @@ import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
 const GOAL_USAGE = "Usage: /goal <objective>";
-const GOAL_USAGE_HINT = "Example: /goal improve benchmark coverage";
+const GOAL_EMPTY_HINT = "No goal is currently set.";
 const GOAL_CONTINUATION_MESSAGE_TYPE = "pi-goal-continuation";
 const GOAL_BUDGET_LIMIT_MESSAGE_TYPE = "pi-goal-budget-limit";
+const REPLACE_GOAL_CHOICE = "Replace current goal";
+const CANCEL_REPLACE_GOAL_CHOICE = "Cancel";
+const RESUME_GOAL_CHOICE = "Resume goal";
+const LEAVE_GOAL_PAUSED_CHOICE = "Leave paused";
 const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 
 type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
@@ -126,7 +130,7 @@ export default function (pi: ExtensionAPI): void {
 						const goal = await readGoal(goalStoreRef(ctx));
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(
-							goal === null ? `${GOAL_USAGE}\n${GOAL_USAGE_HINT}` : formatGoalForTool(goal),
+							goal === null ? `${GOAL_USAGE}\n${GOAL_EMPTY_HINT}` : formatGoalForTool(goal),
 							goal ? "info" : "warning",
 						);
 						return;
@@ -155,7 +159,10 @@ export default function (pi: ExtensionAPI): void {
 						const cleared = await clearGoal(goalStoreRef(ctx));
 						clearAgentGoalAccounting();
 						updateGoalUi(ctx, null);
-						ctx.ui.notify(cleared ? "Goal cleared." : "No goal was set.", cleared ? "info" : "warning");
+						ctx.ui.notify(
+							cleared ? "Goal cleared" : "No goal to clear\nThis thread does not currently have a goal.",
+							cleared ? "info" : "warning",
+						);
 						return;
 					}
 				}
@@ -165,9 +172,12 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		const goal = await readGoal(goalStoreRef(ctx));
 		updateGoalUi(ctx, goal);
+		if (await maybePromptResumePausedGoal(pi, ctx, event.reason, goal)) {
+			return;
+		}
 		if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
 			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
 		}
@@ -208,8 +218,8 @@ export default function (pi: ExtensionAPI): void {
 	async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objective: string): Promise<void> {
 		const ref = goalStoreRef(ctx);
 		const current = await readGoal(ref);
-		if (current !== null && ctx.hasUI) {
-			const shouldReplace = await ctx.ui.confirm("Replace goal?", `New objective: ${objective}`);
+		if (current !== null) {
+			const shouldReplace = await confirmReplaceGoal(ctx, objective);
 			if (!shouldReplace) return;
 		}
 
@@ -221,6 +231,45 @@ export default function (pi: ExtensionAPI): void {
 		updateGoalUi(ctx, goal);
 		ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 		queueGoalContinuation(pi, ctx, goal);
+	}
+
+	async function confirmReplaceGoal(ctx: ExtensionContext, objective: string): Promise<boolean> {
+		if (!ctx.hasUI) return true;
+		const choice = await ctx.ui.select(`Replace goal?\nNew objective: ${objective}`, [
+			REPLACE_GOAL_CHOICE,
+			CANCEL_REPLACE_GOAL_CHOICE,
+		]);
+		return choice === REPLACE_GOAL_CHOICE;
+	}
+
+	async function maybePromptResumePausedGoal(
+		pi: ExtensionAPI,
+		ctx: ExtensionContext,
+		sessionStartReason: string,
+		goal: Goal | null,
+	): Promise<boolean> {
+		if (
+			sessionStartReason !== "resume" ||
+			goal?.status !== "paused" ||
+			!ctx.hasUI ||
+			!ctx.isIdle() ||
+			ctx.hasPendingMessages()
+		) {
+			return false;
+		}
+
+		const choice = await ctx.ui.select(`Resume paused goal?\nGoal: ${goal.objective}`, [
+			RESUME_GOAL_CHOICE,
+			LEAVE_GOAL_PAUSED_CHOICE,
+		]);
+		if (choice !== RESUME_GOAL_CHOICE) return true;
+
+		const resumed = await updateGoal(goalStoreRef(ctx), { status: "active" });
+		beginAgentGoalAccounting(resumed);
+		updateGoalUi(ctx, resumed);
+		ctx.ui.notify(`Goal ${goalStatusLabel(resumed.status)}\n${formatGoalForTool(resumed)}`, "info");
+		queueGoalContinuation(pi, ctx, resumed);
+		return true;
 	}
 
 	function beginAgentGoalAccounting(goal: Goal): void {
