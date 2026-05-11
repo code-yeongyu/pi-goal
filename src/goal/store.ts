@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { Goal, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
+import type { Goal, GoalAccountingMode, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
 import { validateObjective, validateTokenBudget } from "./validation.js";
 
 const STORE_VERSION = 1;
@@ -118,9 +118,13 @@ export async function accountGoalUsage(
 	ref: GoalStoreRef,
 	usage: TokenUsageSnapshot,
 	elapsedSeconds: number,
+	mode: GoalAccountingMode = "active",
+	expectedGoalId?: string,
 ): Promise<Goal | null> {
 	const goal = await readGoal(ref);
-	if (!goal || goal.status !== "active") return goal;
+	if (!goal || (expectedGoalId !== undefined && goal.id !== expectedGoalId) || !canAccountGoalUsage(goal, mode)) {
+		return goal;
+	}
 
 	const tokensUsed = goal.tokensUsed + goalTokenDeltaForUsage(usage);
 	const now = nowSeconds();
@@ -129,11 +133,23 @@ export async function accountGoalUsage(
 		tokensUsed,
 		timeUsedSeconds: goal.timeUsedSeconds + Math.max(0, Math.trunc(elapsedSeconds)),
 		updatedAt: now,
-		status: goal.tokenBudget !== undefined && tokensUsed >= goal.tokenBudget ? "budgetLimited" : goal.status,
+		status:
+			goal.status === "active" && goal.tokenBudget !== undefined && tokensUsed >= goal.tokenBudget
+				? "budgetLimited"
+				: goal.status,
 	};
 	if (next.status === "budgetLimited") delete next.lastStartedAt;
 	await writeGoal(ref, next);
 	return next;
+}
+
+function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
+	switch (mode) {
+		case "active":
+			return goal.status === "active";
+		case "activeOrComplete":
+			return goal.status === "active" || goal.status === "complete";
+	}
 }
 
 function goalTokenDeltaForUsage(usage: TokenUsageSnapshot): number {

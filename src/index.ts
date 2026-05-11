@@ -10,7 +10,7 @@ import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWh
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
-import type { Goal, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
+import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
@@ -18,15 +18,22 @@ const GOAL_USAGE = "Usage: /goal <objective>";
 const GOAL_USAGE_HINT = "Example: /goal improve benchmark coverage";
 const GOAL_CONTINUATION_MESSAGE_TYPE = "pi-goal-continuation";
 const GOAL_BUDGET_LIMIT_MESSAGE_TYPE = "pi-goal-budget-limit";
+const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 
 type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
 type AssistantUsageMessage = {
 	role: "assistant";
 	usage: Record<string, unknown>;
 };
+type AgentGoalAccounting = {
+	goalId: string;
+	measuredFromMilliseconds: number;
+};
 
 export default function (pi: ExtensionAPI): void {
-	let agentStartedAt: number | null = null;
+	let agentTurnInProgress = false;
+	let agentGoalAccounting: AgentGoalAccounting | null = null;
+	let completedThisTurnGoalId: string | null = null;
 
 	async function refreshUi(ctx: ExtensionContext): Promise<void> {
 		updateGoalUi(ctx, await readGoal(goalStoreRef(ctx)));
@@ -58,6 +65,7 @@ export default function (pi: ExtensionAPI): void {
 				);
 			}
 			const goal = await createGoal(ref, params.objective, params.token_budget);
+			beginAgentGoalAccounting(goal);
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal, false));
 		},
@@ -87,7 +95,9 @@ export default function (pi: ExtensionAPI): void {
 					true,
 				);
 			}
+			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
 			const goal = await updateGoal(goalStoreRef(ctx), { status: "complete" });
+			markGoalCompletedThisTurn(goal);
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal, true));
 		},
@@ -126,14 +136,24 @@ export default function (pi: ExtensionAPI): void {
 						return;
 					}
 					case "setStatus": {
+						if (command.status === "paused") {
+							await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+						}
 						const goal = await updateGoal(goalStoreRef(ctx), { status: command.status });
+						if (goal.status === "active") {
+							beginAgentGoalAccounting(goal);
+						} else {
+							stopAgentGoalAccounting(goal.id);
+						}
 						updateGoalUi(ctx, goal);
 						ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
 						queueGoalContinuation(pi, ctx, goal);
 						return;
 					}
 					case "clear": {
+						await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
 						const cleared = await clearGoal(goalStoreRef(ctx));
+						clearAgentGoalAccounting();
 						updateGoalUi(ctx, null);
 						ctx.ui.notify(cleared ? "Goal cleared." : "No goal was set.", cleared ? "info" : "warning");
 						return;
@@ -153,15 +173,23 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("agent_start", () => {
-		agentStartedAt = Date.now();
+	pi.on("agent_start", async (_event, ctx) => {
+		agentTurnInProgress = true;
+		completedThisTurnGoalId = null;
+		const goal = await readGoal(goalStoreRef(ctx));
+		if (goal?.status === "active") {
+			beginAgentGoalAccounting(goal);
+		} else {
+			agentGoalAccounting = null;
+		}
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		const startedAt = agentStartedAt;
-		agentStartedAt = null;
-		const elapsedSeconds = startedAt === null ? 0 : Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-		const goal = await accountGoalUsage(goalStoreRef(ctx), collectAssistantUsage(event.messages), elapsedSeconds);
+		const mode: GoalAccountingMode = completedThisTurnGoalId === null ? "active" : "activeOrComplete";
+		const goal = await accountCurrentAgentTurn(ctx, collectAssistantUsage(event.messages), mode);
+		agentTurnInProgress = false;
+		agentGoalAccounting = null;
+		completedThisTurnGoalId = null;
 		updateGoalUi(ctx, goal);
 		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
 			queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
@@ -176,20 +204,69 @@ export default function (pi: ExtensionAPI): void {
 		await refreshUi(ctx);
 		updateGoalUi(ctx, null);
 	});
-}
 
-async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objective: string): Promise<void> {
-	const ref = goalStoreRef(ctx);
-	const current = await readGoal(ref);
-	if (current !== null && ctx.hasUI) {
-		const shouldReplace = await ctx.ui.confirm("Replace goal?", `New objective: ${objective}`);
-		if (!shouldReplace) return;
+	async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objective: string): Promise<void> {
+		const ref = goalStoreRef(ctx);
+		const current = await readGoal(ref);
+		if (current !== null && ctx.hasUI) {
+			const shouldReplace = await ctx.ui.confirm("Replace goal?", `New objective: ${objective}`);
+			if (!shouldReplace) return;
+		}
+
+		if (current?.status === "active") {
+			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+		}
+		const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective });
+		if (goal.status === "active") beginAgentGoalAccounting(goal);
+		updateGoalUi(ctx, goal);
+		ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
+		queueGoalContinuation(pi, ctx, goal);
 	}
 
-	const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective });
-	updateGoalUi(ctx, goal);
-	ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
-	queueGoalContinuation(pi, ctx, goal);
+	function beginAgentGoalAccounting(goal: Goal): void {
+		if (!agentTurnInProgress || goal.status !== "active") return;
+		agentGoalAccounting = { goalId: goal.id, measuredFromMilliseconds: Date.now() };
+	}
+
+	function markGoalCompletedThisTurn(goal: Goal): void {
+		if (!agentTurnInProgress) return;
+		completedThisTurnGoalId = goal.id;
+		agentGoalAccounting = { goalId: goal.id, measuredFromMilliseconds: Date.now() };
+	}
+
+	function stopAgentGoalAccounting(goalId: string): void {
+		if (agentGoalAccounting?.goalId === goalId) {
+			agentGoalAccounting = null;
+		}
+		if (completedThisTurnGoalId === goalId) {
+			completedThisTurnGoalId = null;
+		}
+	}
+
+	function clearAgentGoalAccounting(): void {
+		agentGoalAccounting = null;
+		completedThisTurnGoalId = null;
+	}
+
+	async function accountCurrentAgentTurn(
+		ctx: ExtensionContext,
+		usage: TokenUsageSnapshot,
+		mode: GoalAccountingMode,
+	): Promise<Goal | null> {
+		const accounting = agentGoalAccounting;
+		const ref = goalStoreRef(ctx);
+		if (accounting === null) return readGoal(ref);
+
+		const now = Date.now();
+		const elapsedSeconds = Math.max(0, Math.round((now - accounting.measuredFromMilliseconds) / 1000));
+		const goal = await accountGoalUsage(ref, usage, elapsedSeconds, mode, accounting.goalId);
+		if (goal?.id === accounting.goalId) {
+			agentGoalAccounting = { goalId: accounting.goalId, measuredFromMilliseconds: now };
+		} else {
+			clearAgentGoalAccounting();
+		}
+		return goal;
+	}
 }
 
 function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
