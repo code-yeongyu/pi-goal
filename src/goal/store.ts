@@ -29,6 +29,10 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 }
 
 export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudget?: number): Promise<Goal> {
+	if ((await readGoal(ref)) !== null) {
+		throw new Error("cannot create a new goal because this thread already has a goal");
+	}
+
 	const normalizedObjective = validateObjective(objective);
 	validateTokenBudget(tokenBudget);
 	const now = nowSeconds();
@@ -59,9 +63,11 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 	const now = nowSeconds();
 	const hasObjectiveUpdate = update.objective !== undefined;
 	const replacesGoal = hasObjectiveUpdate && (objective !== current.objective || current.status === "complete");
-	const status = update.status ?? (hasObjectiveUpdate ? "active" : current.status);
+	const requestedStatus = update.status ?? (hasObjectiveUpdate ? "active" : undefined);
 
 	if (replacesGoal) {
+		const replacementBudget = tokenBudget === null ? undefined : tokenBudget;
+		const status = statusAfterBudgetLimit(requestedStatus ?? "active", 0, replacementBudget);
 		const next: Goal = {
 			id: randomUUID(),
 			threadId: ref.threadId,
@@ -72,13 +78,18 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 			createdAt: now,
 			updatedAt: now,
 		};
-		const replacementBudget = tokenBudget === null ? undefined : tokenBudget;
 		if (replacementBudget !== undefined) next.tokenBudget = replacementBudget;
 		if (status === "active") next.lastStartedAt = now;
+		if (status === "complete") next.completedAt = now;
 		await writeGoal(ref, next);
 		return next;
 	}
 
+	const nextTokenBudget = tokenBudget === null ? undefined : (tokenBudget ?? current.tokenBudget);
+	const status =
+		requestedStatus === undefined
+			? statusAfterBudgetUpdate(current.status, current.tokensUsed, nextTokenBudget)
+			: statusAfterExplicitStatusUpdate(current.status, requestedStatus, current.tokensUsed, nextTokenBudget);
 	const next: Goal = {
 		...current,
 		objective,
@@ -133,10 +144,7 @@ export async function accountGoalUsage(
 		tokensUsed,
 		timeUsedSeconds: goal.timeUsedSeconds + Math.max(0, Math.trunc(elapsedSeconds)),
 		updatedAt: now,
-		status:
-			goal.status === "active" && goal.tokenBudget !== undefined && tokensUsed >= goal.tokenBudget
-				? "budgetLimited"
-				: goal.status,
+		status: statusAfterAccounting(goal.status, tokensUsed, goal.tokenBudget, mode),
 	};
 	if (next.status === "budgetLimited") delete next.lastStartedAt;
 	await writeGoal(ref, next);
@@ -145,16 +153,64 @@ export async function accountGoalUsage(
 
 function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
 	switch (mode) {
-		case "active":
+		case "activeStatusOnly":
 			return goal.status === "active";
+		case "active":
+			return goal.status === "active" || goal.status === "budgetLimited";
 		case "activeOrComplete":
-			return goal.status === "active" || goal.status === "complete";
+			return goal.status === "active" || goal.status === "budgetLimited" || goal.status === "complete";
+		case "activeOrStopped":
+			return goal.status === "active" || goal.status === "paused" || goal.status === "budgetLimited";
 	}
 }
 
 function goalTokenDeltaForUsage(usage: TokenUsageSnapshot): number {
 	const nonCachedInput = Math.max(0, usage.input - usage.cacheRead);
 	return nonCachedInput + Math.max(0, usage.output);
+}
+
+function statusAfterAccounting(
+	status: Goal["status"],
+	tokensUsed: number,
+	tokenBudget: number | undefined,
+	mode: GoalAccountingMode,
+): Goal["status"] {
+	if (tokenBudget === undefined || tokensUsed < tokenBudget) return status;
+	switch (mode) {
+		case "activeStatusOnly":
+		case "active":
+		case "activeOrComplete":
+			return status === "active" ? "budgetLimited" : status;
+		case "activeOrStopped":
+			return status === "active" || status === "paused" || status === "budgetLimited" ? "budgetLimited" : status;
+	}
+}
+
+function statusAfterExplicitStatusUpdate(
+	currentStatus: Goal["status"],
+	requestedStatus: Goal["status"],
+	tokensUsed: number,
+	tokenBudget: number | undefined,
+): Goal["status"] {
+	if (currentStatus === "budgetLimited" && requestedStatus === "paused") return "budgetLimited";
+	return statusAfterBudgetLimit(requestedStatus, tokensUsed, tokenBudget);
+}
+
+function statusAfterBudgetUpdate(
+	currentStatus: Goal["status"],
+	tokensUsed: number,
+	tokenBudget: number | undefined,
+): Goal["status"] {
+	if (currentStatus === "active") return statusAfterBudgetLimit(currentStatus, tokensUsed, tokenBudget);
+	return currentStatus;
+}
+
+function statusAfterBudgetLimit(
+	status: Goal["status"],
+	tokensUsed: number,
+	tokenBudget: number | undefined,
+): Goal["status"] {
+	return status === "active" && tokenBudget !== undefined && tokensUsed >= tokenBudget ? "budgetLimited" : status;
 }
 
 function parseGoalFile(raw: string): GoalFile {

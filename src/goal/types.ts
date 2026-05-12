@@ -9,7 +9,7 @@ export type GoalStoreRef = {
 	threadId: string;
 };
 
-export type GoalAccountingMode = "active" | "activeOrComplete";
+export type GoalAccountingMode = "activeStatusOnly" | "active" | "activeOrComplete" | "activeOrStopped";
 
 export type Goal = {
 	id: string;

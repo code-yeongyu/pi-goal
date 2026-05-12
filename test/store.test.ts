@@ -28,6 +28,21 @@ describe("goal store", () => {
 		expect(await readFile(goalFilePath(ref), "utf8")).toContain('"version": 1');
 	});
 
+	it("does not replace an existing goal when createGoal is called again", async () => {
+		const ref = await tempStore("thread-duplicate-create");
+		const original = await createGoal(ref, "Original", 10_000);
+
+		await expect(createGoal(ref, "Replacement", 20_000)).rejects.toThrow(
+			"cannot create a new goal because this thread already has a goal",
+		);
+
+		expect(await readGoal(ref)).toMatchObject({
+			id: original.id,
+			objective: "Original",
+			tokenBudget: 10_000,
+		});
+	});
+
 	it("replaces changed objectives and preserves usage for status updates", async () => {
 		const ref = await tempStore();
 		const first = await createGoal(ref, "Original");
@@ -81,6 +96,66 @@ describe("goal store", () => {
 		);
 
 		expect(goal).toMatchObject({ status: "budgetLimited", tokensUsed: 51, timeUsedSeconds: 4 });
+	});
+
+	it("continues accounting budget-limited goals for in-flight active usage", async () => {
+		const ref = await tempStore();
+		await createGoal(ref, "Budgeted", 20);
+		await accountGoalUsage(ref, { input: 5, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 5 }, 7);
+		await accountGoalUsage(ref, { input: 15, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }, 3);
+
+		const goal = await accountGoalUsage(
+			ref,
+			{ input: 5, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 5 },
+			5,
+			"active",
+		);
+
+		expect(goal).toMatchObject({ status: "budgetLimited", tokensUsed: 25, timeUsedSeconds: 15 });
+	});
+
+	it("keeps budget-limited goals terminal when paused or reactivated over budget", async () => {
+		const ref = await tempStore();
+		await createGoal(ref, "Budgeted", 20);
+		await accountGoalUsage(ref, { input: 25, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 25 }, 1);
+
+		const paused = await updateGoal(ref, { status: "paused" });
+		expect(paused).toMatchObject({ status: "budgetLimited", tokensUsed: 25, tokenBudget: 20 });
+
+		const reactivated = await updateGoal(ref, { status: "active" });
+		expect(reactivated).toMatchObject({ status: "budgetLimited", tokensUsed: 25, tokenBudget: 20 });
+	});
+
+	it("immediately budget-limits active goals when a lowered budget is already exceeded", async () => {
+		const ref = await tempStore();
+		await createGoal(ref, "Budgeted", 100);
+		await accountGoalUsage(ref, { input: 50, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 50 }, 1);
+
+		const lowered = await updateGoal(ref, { tokenBudget: 40 });
+
+		expect(lowered).toMatchObject({ status: "budgetLimited", tokensUsed: 50, tokenBudget: 40 });
+	});
+
+	it("can finalize paused in-flight usage and promote stopped goals over budget", async () => {
+		const ref = await tempStore();
+		await createGoal(ref, "Stopped", 20);
+		await updateGoal(ref, { status: "paused" });
+
+		const activeOnly = await accountGoalUsage(
+			ref,
+			{ input: 25, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 25 },
+			3,
+			"active",
+		);
+		expect(activeOnly).toMatchObject({ status: "paused", tokensUsed: 0, timeUsedSeconds: 0 });
+
+		const stopped = await accountGoalUsage(
+			ref,
+			{ input: 25, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 25 },
+			3,
+			"activeOrStopped",
+		);
+		expect(stopped).toMatchObject({ status: "budgetLimited", tokensUsed: 25, timeUsedSeconds: 3 });
 	});
 
 	it("clears the store while preserving the versioned file", async () => {
