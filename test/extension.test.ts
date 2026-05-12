@@ -26,6 +26,8 @@ type GoalContext = {
 
 type RegisteredTool = {
 	name: string;
+	description: string;
+	parameters: unknown;
 	execute(
 		toolCallId: string,
 		params: Record<string, unknown>,
@@ -68,6 +70,63 @@ type SentMessage = {
 };
 
 const tempDirs: string[] = [];
+
+describe("pi-goal extension tool contract", () => {
+	it("exposes the Codex goal tools with matching descriptions and schemas", () => {
+		const harness = createHarness();
+
+		expect(toolContract(harness.tool("get_goal"))).toEqual({
+			name: "get_goal",
+			description:
+				"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+			parameters: {
+				type: "object",
+				properties: {},
+				required: [],
+				additionalProperties: false,
+			},
+		});
+		expect(toolContract(harness.tool("create_goal"))).toEqual({
+			name: "create_goal",
+			description:
+				"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if a goal exists; use update_goal only for status.",
+			parameters: {
+				type: "object",
+				required: ["objective"],
+				properties: {
+					objective: {
+						type: "string",
+						description:
+							"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
+					},
+					token_budget: {
+						type: "integer",
+						description: "Optional positive token budget for the new active goal.",
+					},
+				},
+				additionalProperties: false,
+			},
+		});
+		expect(toolContract(harness.tool("update_goal"))).toEqual({
+			name: "update_goal",
+			description:
+				"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
+			parameters: {
+				type: "object",
+				required: ["status"],
+				properties: {
+					status: {
+						type: "string",
+						enum: ["complete"],
+						description:
+							"Required. Set to complete only when the objective is achieved and no required work remains.",
+					},
+				},
+				additionalProperties: false,
+			},
+		});
+	});
+});
 
 describe("pi-goal extension accounting", () => {
 	afterEach(async () => {
@@ -299,6 +358,8 @@ function createExtensionApi(
 		registerTool(tool) {
 			tools.set(tool.name, {
 				name: tool.name,
+				description: tool.description,
+				parameters: tool.parameters,
 				execute(toolCallId, params, signal, onUpdate, ctx) {
 					return tool.execute(toolCallId, params as never, signal, onUpdate, ctx as never);
 				},
@@ -426,4 +487,12 @@ function toolResultText(result: ToolResult): string {
 	const firstContent = result.content[0];
 	if (firstContent?.type !== "text") throw new Error("tool result had no text content");
 	return firstContent.text;
+}
+
+function toolContract(tool: RegisteredTool): Pick<RegisteredTool, "name" | "description" | "parameters"> {
+	return {
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+	};
 }

@@ -10,7 +10,13 @@ import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWh
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
-import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
+import type {
+	CompletableGoalStatus,
+	Goal,
+	GoalAccountingMode,
+	GoalStoreRef,
+	TokenUsageSnapshot,
+} from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
@@ -82,13 +88,12 @@ export default function (pi: ExtensionAPI): void {
 			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
 		parameters: Type.Object(
 			{
-				status: Type.Union(
-					COMPLETABLE_GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
-					{
-						description:
-							"Required. Set to complete only when the objective is achieved and no required work remains.",
-					},
-				),
+				status: Type.Unsafe<CompletableGoalStatus>({
+					type: "string",
+					enum: [...COMPLETABLE_GOAL_STATUS_VALUES],
+					description:
+						"Required. Set to complete only when the objective is achieved and no required work remains.",
+				}),
 			},
 			{ additionalProperties: false },
 		),
@@ -112,7 +117,12 @@ export default function (pi: ExtensionAPI): void {
 		label: "Get Goal",
 		description:
 			"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
-		parameters: Type.Object({}, { additionalProperties: false }),
+		parameters: Type.Unsafe<Record<string, never>>({
+			type: "object",
+			properties: {},
+			required: [],
+			additionalProperties: false,
+		}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const goal = await readGoal(goalStoreRef(ctx));
 			updateGoalUi(ctx, goal);
