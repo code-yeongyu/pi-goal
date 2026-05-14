@@ -4,6 +4,7 @@ import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import { formatGoalElapsedSeconds, formatTokensCompact } from "./format.js";
 import type { Goal, GoalStatus } from "./types.js";
+import { isRecord } from "./types.js";
 
 export const STATUS_KEY = "goal";
 const LEGACY_WIDGET_KEY = "goal";
@@ -314,8 +315,4 @@ function nestedNumericUsageField(usage: Record<string, unknown>, outerKey: strin
 	const outerValue = usage[outerKey];
 	if (!isRecord(outerValue)) return 0;
 	return numericUsageField(outerValue, innerKey);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
 }

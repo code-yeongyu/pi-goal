@@ -1,5 +1,3 @@
-import { GOAL_STATUS_VALUES, type GoalStatus } from "./types.js";
-
 export const MAX_OBJECTIVE_LENGTH = 4_000;
 const GOAL_TOO_LONG_FILE_HINT =
 	"Put longer instructions in a file and refer to that file in the goal, for example: /goal follow the instructions in docs/goal.md.";
@@ -20,10 +18,4 @@ export function validateTokenBudget(value: number | null | undefined): number | 
 	if (value === undefined || value === null) return value;
 	if (!Number.isSafeInteger(value) || value <= 0) throw new Error("tokenBudget must be a positive safe integer");
 	return value;
-}
-
-export function parseGoalStatus(value: string): GoalStatus {
-	const status = GOAL_STATUS_VALUES.find((candidate) => candidate === value);
-	if (!status) throw new Error(`status must be one of: ${GOAL_STATUS_VALUES.join(", ")}`);
-	return status;
 }

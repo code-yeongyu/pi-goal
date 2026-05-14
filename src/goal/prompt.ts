@@ -1,4 +1,3 @@
-import { goalUsageSummary } from "./format.js";
 import type { Goal } from "./types.js";
 
 export function buildContinuationPrompt(goal: Goal): string {
@@ -53,10 +52,6 @@ export function buildBudgetLimitedPrompt(goal: Goal): string {
 		"",
 		"Do not call update_goal unless the goal is actually complete.",
 	].join("\n");
-}
-
-export function buildGoalSummary(goal: Goal): string {
-	return goalUsageSummary(goal);
 }
 
 function tokenBudgetText(goal: Goal): string {

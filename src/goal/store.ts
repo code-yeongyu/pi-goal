@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import {
+	GoalAlreadyExistsError,
+	GoalNotFoundError,
+	InvalidGoalStoreError,
+	UnsupportedGoalStoreVersionError,
+} from "./errors.js";
 import type { Goal, GoalAccountingMode, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
+import { isRecord } from "./types.js";
 import { validateObjective, validateTokenBudget } from "./validation.js";
 
 const STORE_VERSION = 1;
@@ -30,7 +37,7 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 
 export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudget?: number): Promise<Goal> {
 	if ((await readGoal(ref)) !== null) {
-		throw new Error("cannot create a new goal because this thread already has a goal");
+		throw new GoalAlreadyExistsError("cannot create a new goal because this thread already has a goal");
 	}
 
 	const normalizedObjective = validateObjective(objective);
@@ -56,7 +63,7 @@ export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudg
 
 export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise<Goal> {
 	const current = await readGoal(ref);
-	if (!current) throw new Error("cannot update goal: no goal exists");
+	if (!current) throw new GoalNotFoundError("cannot update goal: no goal exists");
 
 	const tokenBudget = validateTokenBudget(update.tokenBudget);
 	const objective = update.objective === undefined ? current.objective : validateObjective(update.objective);
@@ -133,9 +140,9 @@ export async function accountGoalUsage(
 	expectedGoalId?: string,
 ): Promise<Goal | null> {
 	const goal = await readGoal(ref);
-	if (!goal || (expectedGoalId !== undefined && goal.id !== expectedGoalId) || !canAccountGoalUsage(goal, mode)) {
-		return goal;
-	}
+	if (!goal) return goal;
+	if (expectedGoalId !== undefined && goal.id !== expectedGoalId) return goal;
+	if (!canAccountGoalUsage(goal, mode)) return goal;
 
 	const tokensUsed = goal.tokensUsed + goalTokenDeltaForUsage(usage);
 	const now = nowSeconds();
@@ -215,10 +222,11 @@ function statusAfterBudgetLimit(
 
 function parseGoalFile(raw: string): GoalFile {
 	const parsed: unknown = JSON.parse(raw);
-	if (!isRecord(parsed)) throw new Error("goal store must be a JSON object");
-	if (parsed["version"] !== STORE_VERSION) throw new Error("unsupported goal store version");
+	if (!isRecord(parsed)) throw new InvalidGoalStoreError("goal store must be a JSON object");
+	if (parsed["version"] !== STORE_VERSION)
+		throw new UnsupportedGoalStoreVersionError("unsupported goal store version");
 	const goal = parsed["goal"];
-	if (goal !== null && !isGoal(goal)) throw new Error("goal store contains an invalid goal");
+	if (goal !== null && !isGoal(goal)) throw new InvalidGoalStoreError("goal store contains an invalid goal");
 	return {
 		version: STORE_VERSION,
 		goal,
@@ -231,10 +239,6 @@ function isMissingFile(error: unknown): boolean {
 
 function isErrorWithCode(error: unknown): error is Error & { code: string } {
 	return error instanceof Error && "code" in error && typeof error.code === "string";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
 }
 
 function isGoal(value: unknown): value is Goal {
@@ -259,11 +263,15 @@ function isGoalStatus(value: unknown): value is Goal["status"] {
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {
-	return Number.isSafeInteger(value) && typeof value === "number" && value > 0;
+	return isSafeInteger(value) && value > 0;
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
-	return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
+	return isSafeInteger(value) && value >= 0;
+}
+
+function isSafeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value);
 }
 
 function nowSeconds(): number {

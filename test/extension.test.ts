@@ -82,7 +82,6 @@ describe("pi-goal extension tool contract", () => {
 			parameters: {
 				type: "object",
 				properties: {},
-				required: [],
 				additionalProperties: false,
 			},
 		});
@@ -116,8 +115,7 @@ describe("pi-goal extension tool contract", () => {
 				required: ["status"],
 				properties: {
 					status: {
-						type: "string",
-						enum: ["complete"],
+						anyOf: [{ type: "string", const: "complete" }],
 						description:
 							"Required. Set to complete only when the objective is achieved and no required work remains.",
 					},

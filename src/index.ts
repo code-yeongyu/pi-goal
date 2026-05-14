@@ -10,14 +10,8 @@ import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWh
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildBudgetLimitedPrompt, buildContinuationPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
-import type {
-	CompletableGoalStatus,
-	Goal,
-	GoalAccountingMode,
-	GoalStoreRef,
-	TokenUsageSnapshot,
-} from "./goal/types.js";
-import { COMPLETABLE_GOAL_STATUS_VALUES } from "./goal/types.js";
+import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
+import { COMPLETABLE_GOAL_STATUS_VALUES, isRecord } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
 
 const GOAL_USAGE = "Usage: /goal <objective>";
@@ -88,12 +82,13 @@ export default function (pi: ExtensionAPI): void {
 			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
 		parameters: Type.Object(
 			{
-				status: Type.Unsafe<CompletableGoalStatus>({
-					type: "string",
-					enum: [...COMPLETABLE_GOAL_STATUS_VALUES],
-					description:
-						"Required. Set to complete only when the objective is achieved and no required work remains.",
-				}),
+				status: Type.Union(
+					COMPLETABLE_GOAL_STATUS_VALUES.map((status) => Type.Literal(status)),
+					{
+						description:
+							"Required. Set to complete only when the objective is achieved and no required work remains.",
+					},
+				),
 			},
 			{ additionalProperties: false },
 		),
@@ -117,12 +112,7 @@ export default function (pi: ExtensionAPI): void {
 		label: "Get Goal",
 		description:
 			"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
-		parameters: Type.Unsafe<Record<string, never>>({
-			type: "object",
-			properties: {},
-			required: [],
-			additionalProperties: false,
-		}),
+		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const goal = await readGoal(goalStoreRef(ctx));
 			updateGoalUi(ctx, goal);
@@ -258,13 +248,7 @@ export default function (pi: ExtensionAPI): void {
 		sessionStartReason: string,
 		goal: Goal | null,
 	): Promise<boolean> {
-		if (
-			sessionStartReason !== "resume" ||
-			goal?.status !== "paused" ||
-			!ctx.hasUI ||
-			!ctx.isIdle() ||
-			ctx.hasPendingMessages()
-		) {
+		if (!isResumeOfPausedGoal(ctx, sessionStartReason, goal)) {
 			return false;
 		}
 
@@ -328,6 +312,16 @@ export default function (pi: ExtensionAPI): void {
 	}
 }
 
+function isResumeOfPausedGoal(ctx: ExtensionContext, sessionStartReason: string, goal: Goal | null): goal is Goal {
+	return (
+		sessionStartReason === "resume" &&
+		goal?.status === "paused" &&
+		ctx.hasUI &&
+		ctx.isIdle() &&
+		!ctx.hasPendingMessages()
+	);
+}
+
 function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
 	if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
 		queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
@@ -384,10 +378,6 @@ function isAssistantUsageMessage(message: unknown): message is AssistantUsageMes
 function numericUsageField(usage: Record<string, unknown>, key: string): number {
 	const value = usage[key];
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
 }
 
 function errorMessage(error: unknown): string {
