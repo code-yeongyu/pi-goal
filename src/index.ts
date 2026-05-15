@@ -174,6 +174,11 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (event, ctx) => {
 		const goal = await readGoal(goalStoreRef(ctx));
+		if (goal?.status === "active") {
+			beginAgentGoalAccounting(goal);
+		} else {
+			clearAgentGoalAccounting();
+		}
 		updateGoalUi(ctx, goal);
 		if (await maybePromptResumePausedGoal(pi, ctx, event.reason, goal)) {
 			return;
@@ -198,8 +203,12 @@ export default function (pi: ExtensionAPI): void {
 		const mode: GoalAccountingMode = completedThisTurnGoalId === null ? "active" : "activeOrComplete";
 		const goal = await accountCurrentAgentTurn(ctx, collectAssistantUsage(event.messages), mode);
 		agentTurnInProgress = false;
-		agentGoalAccounting = null;
 		completedThisTurnGoalId = null;
+		if (goal?.status === "active") {
+			beginAgentGoalAccounting(goal);
+		} else {
+			clearAgentGoalAccounting();
+		}
 		updateGoalUi(ctx, goal);
 		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
 			queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
@@ -211,6 +220,8 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+		clearAgentGoalAccounting();
 		await refreshUi(ctx);
 		updateGoalUi(ctx, null);
 	});
@@ -267,7 +278,8 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	function beginAgentGoalAccounting(goal: Goal): void {
-		if (!agentTurnInProgress || goal.status !== "active") return;
+		if (goal.status !== "active") return;
+		if (agentGoalAccounting?.goalId === goal.id) return;
 		agentGoalAccounting = { goalId: goal.id, measuredFromMilliseconds: Date.now() };
 	}
 

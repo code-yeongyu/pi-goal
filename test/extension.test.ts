@@ -151,6 +151,32 @@ describe("pi-goal extension accounting", () => {
 		expect(goal?.timeUsedSeconds).toBe(10);
 	});
 
+	it("accounts resumed active goal time from session start without counting offline time", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-resume-active-accounting");
+
+		// given
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.tool("create_goal").execute("create-goal", { objective: "Resume work" }, undefined, undefined, ctx);
+		vi.advanceTimersByTime(20_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+		await harness.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+		vi.advanceTimersByTime(80_000);
+
+		// when
+		await harness.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
+		vi.advanceTimersByTime(7_000);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(11_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		// then
+		const goal = await readGoal(refForContext(ctx));
+		expect(goal?.timeUsedSeconds).toBe(38);
+	});
+
 	it("finalizes elapsed time and usage when update_goal completes an active turn", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
