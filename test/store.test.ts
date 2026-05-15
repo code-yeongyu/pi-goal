@@ -72,7 +72,7 @@ describe("goal store", () => {
 		expect(resumed.status).toBe("active");
 	});
 
-	it("counts non-cached input plus output tokens like Codex", async () => {
+	it("counts Pi non-cached input plus output tokens like Codex", async () => {
 		const ref = await tempStore();
 		await createGoal(ref, "Budgeted");
 
@@ -82,7 +82,7 @@ describe("goal store", () => {
 			0,
 		);
 
-		expect(goal).toMatchObject({ tokensUsed: 50 });
+		expect(goal).toMatchObject({ tokensUsed: 120 });
 	});
 
 	it("marks active goals budgetLimited when accounting reaches budget", async () => {

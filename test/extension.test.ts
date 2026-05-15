@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readGoal } from "../src/goal/store.js";
+import { goalFilePath, readGoal } from "../src/goal/store.js";
 import type { GoalStoreRef } from "../src/goal/types.js";
 import { goalFooterIndicator } from "../src/goal/ui.js";
 import piGoalExtension from "../src/index.js";
@@ -215,8 +215,81 @@ describe("pi-goal extension accounting", () => {
 		);
 
 		const finalizedGoal = await readGoal(refForContext(ctx));
-		expect(finalizedGoal?.tokensUsed).toBe(60);
+		expect(finalizedGoal?.tokensUsed).toBe(120);
 		expect(finalizedGoal?.timeUsedSeconds).toBe(70);
+	});
+
+	it("does not check pending messages after a goal completes", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-complete-with-stale-pending");
+
+		await harness
+			.tool("create_goal")
+			.execute("create-goal", { objective: "finish without continuation checks" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.tool("update_goal").execute("complete-goal", { status: "complete" }, undefined, undefined, ctx);
+		ctx.hasPendingMessages = () => {
+			throw new Error("stale pending messages");
+		};
+
+		await expect(harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx)).resolves.toBeUndefined();
+	});
+
+	it("does not fail completed accounting when the UI ctx is stale", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-complete-with-stale-ui");
+
+		await harness
+			.tool("create_goal")
+			.execute("create-goal", { objective: "finish with stale ui" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.tool("update_goal").execute("complete-goal", { status: "complete" }, undefined, undefined, ctx);
+		Object.defineProperty(ctx, "hasUI", {
+			get() {
+				throw new Error("This extension ctx is stale after session replacement or reload.");
+			},
+		});
+
+		await expect(
+			harness.emit(
+				"agent_end",
+				{
+					type: "agent_end",
+					messages: [
+						{
+							role: "assistant",
+							usage: { input: 100, output: 20, cacheRead: 60, cacheWrite: 0, totalTokens: 120 },
+						},
+					],
+				},
+				ctx,
+			),
+		).resolves.toBeUndefined();
+
+		const goal = await readGoal(refForContext(ctx));
+		expect(goal?.tokensUsed).toBe(120);
+	});
+
+	it("does not reread goal state during shutdown when no accounting is active", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-shutdown-no-accounting");
+		const filePath = goalFilePath(refForContext(ctx));
+		await mkdir(dirname(filePath), { recursive: true });
+		await writeFile(filePath, "", "utf8");
+
+		await expect(harness.emit("session_shutdown", { type: "session_shutdown" }, ctx)).resolves.toBeUndefined();
+	});
+
+	it("does not touch stale shutdown ctx when no accounting is active", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-shutdown-stale-ctx");
+		Object.defineProperty(ctx, "hasUI", {
+			get() {
+				throw new Error("stale ctx");
+			},
+		});
+
+		await expect(harness.emit("session_shutdown", { type: "session_shutdown" }, ctx)).resolves.toBeUndefined();
 	});
 });
 

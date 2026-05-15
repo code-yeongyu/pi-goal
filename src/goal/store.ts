@@ -172,8 +172,7 @@ function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
 }
 
 function goalTokenDeltaForUsage(usage: TokenUsageSnapshot): number {
-	const nonCachedInput = Math.max(0, usage.input - usage.cacheRead);
-	return nonCachedInput + Math.max(0, usage.output);
+	return Math.max(0, usage.input) + Math.max(0, usage.output);
 }
 
 function statusAfterAccounting(

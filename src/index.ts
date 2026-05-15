@@ -23,6 +23,7 @@ const CANCEL_REPLACE_GOAL_CHOICE = "Cancel";
 const RESUME_GOAL_CHOICE = "Resume goal";
 const LEAVE_GOAL_PAUSED_CHOICE = "Leave paused";
 const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+const STALE_EXTENSION_CONTEXT_ERROR_PREFIX = "This extension ctx is stale after session replacement or reload.";
 
 type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
 type AssistantUsageMessage = {
@@ -38,10 +39,6 @@ export default function (pi: ExtensionAPI): void {
 	let agentTurnInProgress = false;
 	let agentGoalAccounting: AgentGoalAccounting | null = null;
 	let completedThisTurnGoalId: string | null = null;
-
-	async function refreshUi(ctx: ExtensionContext): Promise<void> {
-		updateGoalUi(ctx, await readGoal(goalStoreRef(ctx)));
-	}
 
 	pi.registerTool({
 		name: "create_goal",
@@ -209,21 +206,23 @@ export default function (pi: ExtensionAPI): void {
 		} else {
 			clearAgentGoalAccounting();
 		}
-		updateGoalUi(ctx, goal);
-		if (goal?.status === "budgetLimited" && !ctx.hasPendingMessages()) {
-			queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
+		updateGoalUiBestEffort(ctx, goal);
+		if (goal?.status === "budgetLimited") {
+			if (!ctx.hasPendingMessages()) {
+				queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
+			}
 			return;
 		}
-		if (shouldQueueGoalContinuationAfterAgentEnd(goal, ctx.hasPendingMessages())) {
+		if (goal?.status === "active" && shouldQueueGoalContinuationAfterAgentEnd(goal, ctx.hasPendingMessages())) {
 			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
 		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+		if (agentGoalAccounting !== null) {
+			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+		}
 		clearAgentGoalAccounting();
-		await refreshUi(ctx);
-		updateGoalUi(ctx, null);
 	});
 
 	async function setGoalObjective(pi: ExtensionAPI, ctx: ExtensionContext, objective: string): Promise<void> {
@@ -321,6 +320,17 @@ export default function (pi: ExtensionAPI): void {
 			clearAgentGoalAccounting();
 		}
 		return goal;
+	}
+}
+
+function updateGoalUiBestEffort(ctx: ExtensionContext, goal: Goal | null): void {
+	try {
+		updateGoalUi(ctx, goal);
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith(STALE_EXTENSION_CONTEXT_ERROR_PREFIX)) {
+			return;
+		}
+		throw error;
 	}
 }
 
