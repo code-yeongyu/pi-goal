@@ -18,7 +18,6 @@ describe("goal continuation policy", () => {
 	it("only auto-continues active goals after an agent turn", () => {
 		expect(shouldQueueGoalContinuationAfterAgentEnd(null, false)).toBe(false);
 		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "paused" }), false)).toBe(false);
-		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "budgetLimited" }), false)).toBe(false);
 		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "complete" }), false)).toBe(false);
 	});
 

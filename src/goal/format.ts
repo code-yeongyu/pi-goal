@@ -32,20 +32,9 @@ export function goalStatusLabel(status: GoalStatus): string {
 			return "active";
 		case "paused":
 			return "paused";
-		case "budgetLimited":
-			return "limited by budget";
 		case "complete":
 			return "complete";
 	}
-}
-
-export function goalUsageSummary(goal: Goal): string {
-	const parts = [`Objective: ${goal.objective}`];
-	if (goal.timeUsedSeconds > 0) parts.push(`Time: ${formatGoalElapsedSeconds(goal.timeUsedSeconds)}.`);
-	if (goal.tokenBudget !== undefined) {
-		parts.push(`Tokens: ${formatTokensCompact(goal.tokensUsed)}/${formatTokensCompact(goal.tokenBudget)}.`);
-	}
-	return parts.join(" ");
 }
 
 export function formatGoalForTool(goal: Goal | null): string {
@@ -54,26 +43,22 @@ export function formatGoalForTool(goal: Goal | null): string {
 		`Objective: ${goal.objective}`,
 		`Status: ${goalStatusLabel(goal.status)}`,
 		`Time used: ${formatGoalElapsedSeconds(goal.timeUsedSeconds)}`,
-		`Tokens used: ${formatTokensCompact(goal.tokensUsed)}${goal.tokenBudget === undefined ? "" : `/${formatTokensCompact(goal.tokenBudget)}`}`,
+		`Tokens used: ${formatTokensCompact(goal.tokensUsed)}`,
 	];
 	if (goal.completedAt) lines.push(`Completed at: ${new Date(goal.completedAt * 1000).toISOString()}`);
 	return lines.join("\n");
 }
 
-export function goalToolResponse(goal: Goal | null, includeCompletionBudgetReport: boolean): GoalToolResponse {
-	return {
-		goal: goal === null ? null : goalToolSnapshot(goal),
-		remainingTokens: remainingTokens(goal),
-		completionBudgetReport: includeCompletionBudgetReport ? completionBudgetReport(goal) : null,
-	};
+export function goalToolResponse(goal: Goal | null): GoalToolResponse {
+	return { goal: goal === null ? null : goalToolSnapshot(goal) };
 }
 
-export function formatGoalToolResponse(goal: Goal | null, includeCompletionBudgetReport: boolean): string {
-	return JSON.stringify(goalToolResponse(goal, includeCompletionBudgetReport), null, 2);
+export function formatGoalToolResponse(goal: Goal | null): string {
+	return JSON.stringify(goalToolResponse(goal), null, 2);
 }
 
 function goalToolSnapshot(goal: Goal): GoalToolSnapshot {
-	const snapshot: GoalToolSnapshot = {
+	return {
 		threadId: goal.threadId,
 		objective: goal.objective,
 		status: goal.status,
@@ -82,22 +67,6 @@ function goalToolSnapshot(goal: Goal): GoalToolSnapshot {
 		createdAt: goal.createdAt,
 		updatedAt: goal.updatedAt,
 	};
-	if (goal.tokenBudget !== undefined) snapshot.tokenBudget = goal.tokenBudget;
-	return snapshot;
-}
-
-function remainingTokens(goal: Goal | null): number | null {
-	if (goal?.tokenBudget === undefined) return null;
-	return Math.max(0, goal.tokenBudget - goal.tokensUsed);
-}
-
-function completionBudgetReport(goal: Goal | null): string | null {
-	if (goal?.status !== "complete") return null;
-	const parts: string[] = [];
-	if (goal.tokenBudget !== undefined) parts.push(`tokens used: ${goal.tokensUsed} of ${goal.tokenBudget}`);
-	if (goal.timeUsedSeconds > 0) parts.push(`time used: ${goal.timeUsedSeconds} seconds`);
-	if (parts.length === 0) return null;
-	return `Goal achieved. Report final budget usage to the user: ${parts.join("; ")}.`;
 }
 
 function formatOneDecimal(value: number): string {

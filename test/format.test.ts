@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { formatGoalElapsedSeconds, goalToolResponse, goalUsageSummary } from "../src/goal/format.js";
+import {
+	formatGoalElapsedSeconds,
+	formatGoalForTool,
+	formatTokensCompact,
+	goalToolResponse,
+} from "../src/goal/format.js";
 import type { Goal } from "../src/goal/types.js";
 
 describe("goal display formatting", () => {
@@ -16,34 +21,42 @@ describe("goal display formatting", () => {
 		expect(formatGoalElapsedSeconds(2 * 24 * 60 * 60 + 23 * 60 * 60 + 42 * 60)).toBe("2d 23h 42m");
 	});
 
-	it("summarizes goal time and budgeted tokens", () => {
-		expect(goalUsageSummary(testGoal({ tokenBudget: 50_000, tokensUsed: 63_876 }))).toBe(
-			"Objective: Port /goal as a pi extension Time: 2m. Tokens: 63.9K/50K.",
-		);
+	it("formats compact token counts", () => {
+		expect(formatTokensCompact(999)).toBe("999");
+		expect(formatTokensCompact(1_500)).toBe("1.5K");
+		expect(formatTokensCompact(2_000_000)).toBe("2M");
 	});
 
-	it("returns Codex-style tool response budget report for completed budgeted goals", () => {
-		expect(
-			goalToolResponse(
-				testGoal({
-					status: "complete",
-					tokenBudget: 10_000,
-					tokensUsed: 3_250,
-					timeUsedSeconds: 75,
-				}),
-				true,
-			),
-		).toMatchObject({
+	it("renders the tool view without any budget fields", () => {
+		const text = formatGoalForTool(testGoal({ tokensUsed: 1_200, timeUsedSeconds: 65 }));
+
+		expect(text).toContain("Objective: Port /goal as a pi extension");
+		expect(text).toContain("Status: active");
+		expect(text).toContain("Time used: 1m");
+		expect(text).toContain("Tokens used: 1.2K");
+		expect(text.toLowerCase()).not.toContain("budget");
+		expect(text.toLowerCase()).not.toContain("remaining");
+	});
+
+	it("produces a snapshot tool response with no budget keys", () => {
+		const response = goalToolResponse(
+			testGoal({ status: "complete", tokensUsed: 3_250, timeUsedSeconds: 75, completedAt: 1_777_766_500 }),
+		);
+
+		expect(response).toMatchObject({
 			goal: {
 				threadId: "thread-1",
+				objective: "Port /goal as a pi extension",
 				status: "complete",
-				tokenBudget: 10_000,
+				tokensUsed: 3_250,
+				timeUsedSeconds: 75,
 				createdAt: 1_777_766_400,
 			},
-			remainingTokens: 6_750,
-			completionBudgetReport:
-				"Goal achieved. Report final budget usage to the user: tokens used: 3250 of 10000; time used: 75 seconds.",
 		});
+		const serialized = JSON.stringify(response);
+		expect(serialized.toLowerCase()).not.toContain("budget");
+		expect(serialized.toLowerCase()).not.toContain("remaining");
+		expect(goalToolResponse(null).goal).toBeNull();
 	});
 });
 

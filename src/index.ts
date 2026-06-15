@@ -8,7 +8,7 @@ import { Type } from "typebox";
 import { parseGoalCommand } from "./goal/command.js";
 import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWhenIdle } from "./goal/continuation.js";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
-import { buildBudgetLimitedPrompt, buildContinuationPrompt } from "./goal/prompt.js";
+import { buildContinuationPrompt } from "./goal/prompt.js";
 import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
 import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES, isRecord } from "./goal/types.js";
@@ -17,7 +17,6 @@ import { updateGoalUi } from "./goal/ui.js";
 const GOAL_USAGE = "Usage: /goal <objective>";
 const GOAL_EMPTY_HINT = "No goal is currently set.";
 const GOAL_CONTINUATION_MESSAGE_TYPE = "pi-goal-continuation";
-const GOAL_BUDGET_LIMIT_MESSAGE_TYPE = "pi-goal-budget-limit";
 const REPLACE_GOAL_CHOICE = "Replace current goal";
 const CANCEL_REPLACE_GOAL_CHOICE = "Cancel";
 const RESUME_GOAL_CHOICE = "Resume goal";
@@ -25,7 +24,7 @@ const LEAVE_GOAL_PAUSED_CHOICE = "Leave paused";
 const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 const STALE_EXTENSION_CONTEXT_ERROR_PREFIX = "This extension ctx is stale after session replacement or reload.";
 
-type GoalToolResult = AgentToolResult<Record<string, never>> & { isError?: boolean };
+type GoalToolResult = AgentToolResult<Record<string, never>>;
 type AssistantUsageMessage = {
 	role: "assistant";
 	usage: Record<string, unknown>;
@@ -44,31 +43,27 @@ export default function (pi: ExtensionAPI): void {
 		name: "create_goal",
 		label: "Create Goal",
 		description:
-			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if a goal exists; use update_goal only for status.",
+			"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nFails if a goal already exists; use update_goal only for status.",
 		parameters: Type.Object(
 			{
 				objective: Type.String({
 					description:
 						"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
 				}),
-				token_budget: Type.Optional(
-					Type.Integer({ description: "Optional positive token budget for the new active goal." }),
-				),
 			},
 			{ additionalProperties: false },
 		),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const ref = goalStoreRef(ctx);
 			if ((await readGoal(ref)) !== null) {
-				return toolText(
+				throw new Error(
 					"cannot create a new goal because this thread already has a goal; use update_goal only when the existing goal is complete",
-					true,
 				);
 			}
-			const goal = await createGoal(ref, params.objective, params.token_budget);
+			const goal = await createGoal(ref, params.objective);
 			beginAgentGoalAccounting(goal);
 			updateGoalUi(ctx, goal);
-			return toolText(formatGoalToolResponse(goal, false));
+			return toolText(formatGoalToolResponse(goal));
 		},
 	});
 
@@ -76,7 +71,7 @@ export default function (pi: ExtensionAPI): void {
 		name: "update_goal",
 		label: "Update Goal",
 		description:
-			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
+			"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because you are stopping work.\nYou cannot use this tool to pause or resume a goal; those status changes are controlled by the user or system.\nWhen marking the goal achieved with status `complete`, report the final elapsed time and token usage from the tool result to the user.",
 		parameters: Type.Object(
 			{
 				status: Type.Union(
@@ -91,29 +86,27 @@ export default function (pi: ExtensionAPI): void {
 		),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (params.status !== "complete") {
-				return toolText(
-					"update_goal can only mark the existing goal complete; pause, resume, and budget-limited status changes are controlled by the user or system",
-					true,
+				throw new Error(
+					"update_goal can only mark the existing goal complete; pause and resume are controlled by the user or system",
 				);
 			}
 			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
 			const goal = await updateGoal(goalStoreRef(ctx), { status: "complete" });
 			markGoalCompletedThisTurn(goal);
 			updateGoalUi(ctx, goal);
-			return toolText(formatGoalToolResponse(goal, true));
+			return toolText(formatGoalToolResponse(goal));
 		},
 	});
 
 	pi.registerTool({
 		name: "get_goal",
 		label: "Get Goal",
-		description:
-			"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+		description: "Get the current goal for this thread, including status, token and elapsed-time usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const goal = await readGoal(goalStoreRef(ctx));
 			updateGoalUi(ctx, goal);
-			return toolText(formatGoalToolResponse(goal, false));
+			return toolText(formatGoalToolResponse(goal));
 		},
 	});
 
@@ -181,7 +174,7 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 		if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
-			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
+			queueHiddenGoalPrompt(pi, buildContinuationPrompt(goal));
 		}
 	});
 
@@ -207,14 +200,8 @@ export default function (pi: ExtensionAPI): void {
 			clearAgentGoalAccounting();
 		}
 		updateGoalUiBestEffort(ctx, goal);
-		if (goal?.status === "budgetLimited") {
-			if (!ctx.hasPendingMessages()) {
-				queueHiddenGoalPrompt(pi, GOAL_BUDGET_LIMIT_MESSAGE_TYPE, buildBudgetLimitedPrompt(goal));
-			}
-			return;
-		}
 		if (goal?.status === "active" && shouldQueueGoalContinuationAfterAgentEnd(goal, ctx.hasPendingMessages())) {
-			queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
+			queueHiddenGoalPrompt(pi, buildContinuationPrompt(goal));
 		}
 	});
 
@@ -346,12 +333,15 @@ function isResumeOfPausedGoal(ctx: ExtensionContext, sessionStartReason: string,
 
 function queueGoalContinuation(pi: ExtensionAPI, ctx: ExtensionContext, goal: Goal): void {
 	if (shouldQueueGoalContinuationWhenIdle(goal, ctx.isIdle(), ctx.hasPendingMessages())) {
-		queueHiddenGoalPrompt(pi, GOAL_CONTINUATION_MESSAGE_TYPE, buildContinuationPrompt(goal));
+		queueHiddenGoalPrompt(pi, buildContinuationPrompt(goal));
 	}
 }
 
-function queueHiddenGoalPrompt(pi: ExtensionAPI, customType: string, content: string): void {
-	pi.sendMessage({ customType, content, display: false }, { triggerTurn: true, deliverAs: "followUp" });
+function queueHiddenGoalPrompt(pi: ExtensionAPI, content: string): void {
+	pi.sendMessage(
+		{ customType: GOAL_CONTINUATION_MESSAGE_TYPE, content, display: false },
+		{ triggerTurn: true, deliverAs: "followUp" },
+	);
 }
 
 function goalStoreRef(ctx: ExtensionContext): GoalStoreRef {
@@ -375,8 +365,8 @@ function cwdStoreKey(cwd: string): string {
 	return createHash("sha256").update(cwd).digest("hex").slice(0, 24);
 }
 
-function toolText(text: string, isError = false): GoalToolResult {
-	return { content: [{ type: "text" as const, text }], details: {}, isError };
+function toolText(text: string): GoalToolResult {
+	return { content: [{ type: "text" as const, text }], details: {} };
 }
 
 function collectAssistantUsage(messages: unknown[]): TokenUsageSnapshot {

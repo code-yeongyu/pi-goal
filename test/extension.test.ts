@@ -6,7 +6,6 @@ import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agen
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { goalFilePath, readGoal } from "../src/goal/store.js";
 import type { GoalStoreRef } from "../src/goal/types.js";
-import { goalFooterIndicator } from "../src/goal/ui.js";
 import piGoalExtension from "../src/index.js";
 
 type ToolResult = AgentToolResult<unknown>;
@@ -60,9 +59,7 @@ type MockUi = {
 	select(title: string, options: string[]): Promise<string | undefined>;
 	confirm(title: string, message: string): Promise<boolean>;
 	notify(message: string, type?: NotifyType): void;
-	setWidget(key: string, content: string[] | undefined): void;
 	setStatus(key: string, text: string | undefined): void;
-	setFooter(factory: unknown): void;
 };
 type SentMessage = {
 	message: { customType: string; content: string; display: boolean };
@@ -72,13 +69,12 @@ type SentMessage = {
 const tempDirs: string[] = [];
 
 describe("pi-goal extension tool contract", () => {
-	it("exposes the Codex goal tools with matching descriptions and schemas", () => {
+	it("exposes budget-free Codex goal tools with matching descriptions and schemas", () => {
 		const harness = createHarness();
 
 		expect(toolContract(harness.tool("get_goal"))).toEqual({
 			name: "get_goal",
-			description:
-				"Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
+			description: "Get the current goal for this thread, including status, token and elapsed-time usage.",
 			parameters: {
 				type: "object",
 				properties: {},
@@ -88,7 +84,7 @@ describe("pi-goal extension tool contract", () => {
 		expect(toolContract(harness.tool("create_goal"))).toEqual({
 			name: "create_goal",
 			description:
-				"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if a goal exists; use update_goal only for status.",
+				"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nFails if a goal already exists; use update_goal only for status.",
 			parameters: {
 				type: "object",
 				required: ["objective"],
@@ -98,10 +94,6 @@ describe("pi-goal extension tool contract", () => {
 						description:
 							"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
 					},
-					token_budget: {
-						type: "integer",
-						description: "Optional positive token budget for the new active goal.",
-					},
 				},
 				additionalProperties: false,
 			},
@@ -109,7 +101,7 @@ describe("pi-goal extension tool contract", () => {
 		expect(toolContract(harness.tool("update_goal"))).toEqual({
 			name: "update_goal",
 			description:
-				"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\nYou cannot use this tool to pause, resume, or budget-limit a goal; those status changes are controlled by the user or system.\nWhen marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
+				"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because you are stopping work.\nYou cannot use this tool to pause or resume a goal; those status changes are controlled by the user or system.\nWhen marking the goal achieved with status `complete`, report the final elapsed time and token usage from the tool result to the user.",
 			parameters: {
 				type: "object",
 				required: ["status"],
@@ -123,6 +115,52 @@ describe("pi-goal extension tool contract", () => {
 				additionalProperties: false,
 			},
 		});
+	});
+
+	it("never mentions token budgets in any tool definition", () => {
+		const harness = createHarness();
+
+		for (const name of ["create_goal", "update_goal", "get_goal"]) {
+			expect(JSON.stringify(harness.tool(name)).toLowerCase()).not.toContain("budget");
+		}
+	});
+});
+
+describe("pi-goal extension tool behavior", () => {
+	afterEach(async () => {
+		vi.useRealTimers();
+		await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+	});
+
+	it("creates, reads, and completes a goal through the tools and file store", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-tool-lifecycle");
+		const ref = refForContext(ctx);
+
+		await harness.tool("create_goal").execute("c1", { objective: "Ship goal extension" }, undefined, undefined, ctx);
+		const persisted = await readGoal(ref);
+		expect(persisted?.objective).toBe("Ship goal extension");
+		expect(persisted?.status).toBe("active");
+		expect(persisted).not.toHaveProperty("tokenBudget");
+
+		const got = await harness.tool("get_goal").execute("g1", {}, undefined, undefined, ctx);
+		expect(JSON.parse(toolResultText(got))).toMatchObject({
+			goal: { objective: "Ship goal extension", status: "active" },
+		});
+		expect(toolResultText(got).toLowerCase()).not.toContain("budget");
+
+		await harness.tool("update_goal").execute("u1", { status: "complete" }, undefined, undefined, ctx);
+		expect((await readGoal(ref))?.status).toBe("complete");
+	});
+
+	it("refuses a second create_goal while a goal exists", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-duplicate");
+
+		await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, ctx);
+		await expect(
+			harness.tool("create_goal").execute("c2", { objective: "Second" }, undefined, undefined, ctx),
+		).rejects.toThrow("already has a goal");
 	});
 });
 
@@ -196,7 +234,6 @@ describe("pi-goal extension accounting", () => {
 		const completedGoal = await readGoal(refForContext(ctx));
 		expect(completedGoal?.status).toBe("complete");
 		expect(completedGoal?.timeUsedSeconds).toBe(65);
-		expect(completedGoal === null ? "" : goalFooterIndicator(completedGoal).text).toBe("Goal achieved (1m)");
 		expect(toolResultText(completion)).toContain('"timeUsedSeconds": 65');
 
 		vi.advanceTimersByTime(5_000);
@@ -290,6 +327,20 @@ describe("pi-goal extension accounting", () => {
 		});
 
 		await expect(harness.emit("session_shutdown", { type: "session_shutdown" }, ctx)).resolves.toBeUndefined();
+	});
+
+	it("queues a budget-free hidden continuation prompt after agent_end while a goal is active", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-continuation");
+
+		await harness.tool("create_goal").execute("c1", { objective: "Keep going" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		expect(harness.sentMessages).toHaveLength(1);
+		expect(harness.sentMessages[0]?.message.customType).toBe("pi-goal-continuation");
+		expect(harness.sentMessages[0]?.message.display).toBe(false);
+		expect(harness.sentMessages[0]?.message.content.toLowerCase()).not.toContain("token budget");
 	});
 });
 
@@ -567,9 +618,7 @@ function createMockUi(
 		notify(message, type) {
 			this.notifyCalls.push({ message, type });
 		},
-		setWidget() {},
 		setStatus() {},
-		setFooter() {},
 	};
 }
 

@@ -1,38 +1,43 @@
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { Goal } from "../src/goal/types.js";
-import { composeFooterStatusLine, goalFooterIndicator } from "../src/goal/ui.js";
+import { goalStatusText, STATUS_KEY, updateGoalUi } from "../src/goal/ui.js";
 
-describe("goal footer UI", () => {
-	it("formats Codex-style goal indicator labels", () => {
-		expect(goalFooterIndicator(testGoal()).text).toBe("Pursuing goal (2m)");
-		expect(goalFooterIndicator(testGoal({ tokenBudget: 50_000, tokensUsed: 12_500 })).text).toBe(
-			"Pursuing goal (12.5K / 50K)",
-		);
-		expect(goalFooterIndicator(testGoal({ status: "paused" })).text).toBe("Goal paused (/goal resume)");
-		expect(
-			goalFooterIndicator(testGoal({ status: "budgetLimited", tokenBudget: 50_000, tokensUsed: 63_876 })).text,
-		).toBe("Goal unmet (63.9K / 50K tokens)");
-		expect(goalFooterIndicator(testGoal({ status: "complete", tokenBudget: 10_000, tokensUsed: 3_250 })).text).toBe(
-			"Goal achieved (3.3K tokens)",
-		);
+type SetStatusCall = { key: string; text: string | undefined };
+
+describe("goal status UI", () => {
+	it("derives Codex-style status text for each state", () => {
+		expect(goalStatusText(testGoal({ status: "active", timeUsedSeconds: 0 }))).toBe("Pursuing goal");
+		expect(goalStatusText(testGoal({ status: "active", timeUsedSeconds: 65 }))).toBe("Pursuing goal (1m)");
+		expect(goalStatusText(testGoal({ status: "paused" }))).toBe("Goal paused (/goal resume)");
+		expect(goalStatusText(testGoal({ status: "complete" }))).toBe("Goal achieved");
 	});
 
-	it("right-aligns the goal indicator on the bottom footer line", () => {
-		const line = composeFooterStatusLine("", "Pursuing goal (2m)", 32);
+	it("sets and clears the status segment, respecting hasUI", () => {
+		const calls: SetStatusCall[] = [];
+		const ctx = makeUiCtx(true, (key, text) => calls.push({ key, text }));
 
-		expect(line).toHaveLength(32);
-		expect(line.endsWith("Pursuing goal (2m)")).toBe(true);
-		expect(line.trimStart()).toBe("Pursuing goal (2m)");
-	});
+		updateGoalUi(ctx, testGoal({ status: "active", timeUsedSeconds: 0 }));
+		updateGoalUi(ctx, null);
+		expect(calls).toEqual([
+			{ key: STATUS_KEY, text: "Pursuing goal" },
+			{ key: STATUS_KEY, text: undefined },
+		]);
 
-	it("keeps other extension statuses on the left when the goal indicator fits", () => {
-		const line = composeFooterStatusLine("review ready", "Goal paused (/goal resume)", 52);
-
-		expect(line).toHaveLength(52);
-		expect(line.startsWith("review ready")).toBe(true);
-		expect(line.endsWith("Goal paused (/goal resume)")).toBe(true);
+		const noUiCalls: SetStatusCall[] = [];
+		const noUiCtx = makeUiCtx(false, (key, text) => noUiCalls.push({ key, text }));
+		updateGoalUi(noUiCtx, testGoal());
+		expect(noUiCalls).toHaveLength(0);
 	});
 });
+
+function makeUiCtx(hasUI: boolean, setStatus: (key: string, text: string | undefined) => void): ExtensionContext {
+	const ctx: Pick<ExtensionContext, "hasUI"> & { ui: Pick<ExtensionContext["ui"], "setStatus"> } = {
+		hasUI,
+		ui: { setStatus },
+	};
+	return ctx as never;
+}
 
 function testGoal(overrides: Partial<Goal> = {}): Goal {
 	return {

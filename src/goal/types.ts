@@ -1,4 +1,4 @@
-export const GOAL_STATUS_VALUES = ["active", "paused", "budgetLimited", "complete"] as const;
+export const GOAL_STATUS_VALUES = ["active", "paused", "complete"] as const;
 export const COMPLETABLE_GOAL_STATUS_VALUES = ["complete"] as const;
 
 export type GoalStatus = (typeof GOAL_STATUS_VALUES)[number];
@@ -9,14 +9,13 @@ export type GoalStoreRef = {
 	threadId: string;
 };
 
-export type GoalAccountingMode = "activeStatusOnly" | "active" | "activeOrComplete" | "activeOrStopped";
+export type GoalAccountingMode = "active" | "activeOrComplete";
 
 export type Goal = {
 	id: string;
 	threadId: string;
 	objective: string;
 	status: GoalStatus;
-	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
 	createdAt: number;
@@ -41,14 +40,12 @@ export type TokenUsageSnapshot = {
 export type GoalUpdate = {
 	objective?: string;
 	status?: GoalStatus;
-	tokenBudget?: number | null;
 };
 
 export type GoalToolSnapshot = {
 	threadId: string;
 	objective: string;
 	status: GoalStatus;
-	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
 	createdAt: number;
@@ -57,8 +54,6 @@ export type GoalToolSnapshot = {
 
 export type GoalToolResponse = {
 	goal: GoalToolSnapshot | null;
-	remainingTokens: number | null;
-	completionBudgetReport: string | null;
 };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

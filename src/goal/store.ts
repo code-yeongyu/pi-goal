@@ -9,7 +9,7 @@ import {
 } from "./errors.js";
 import type { Goal, GoalAccountingMode, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
 import { isRecord } from "./types.js";
-import { validateObjective, validateTokenBudget } from "./validation.js";
+import { validateObjective } from "./validation.js";
 
 const STORE_VERSION = 1;
 
@@ -35,13 +35,12 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 	await writeFile(filePath, `${JSON.stringify(file, null, 2)}\n`, "utf8");
 }
 
-export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudget?: number): Promise<Goal> {
+export async function createGoal(ref: GoalStoreRef, objective: string): Promise<Goal> {
 	if ((await readGoal(ref)) !== null) {
 		throw new GoalAlreadyExistsError("cannot create a new goal because this thread already has a goal");
 	}
 
 	const normalizedObjective = validateObjective(objective);
-	validateTokenBudget(tokenBudget);
 	const now = nowSeconds();
 	const goal: Goal = {
 		id: randomUUID(),
@@ -54,9 +53,6 @@ export async function createGoal(ref: GoalStoreRef, objective: string, tokenBudg
 		updatedAt: now,
 		lastStartedAt: now,
 	};
-	if (tokenBudget !== undefined) {
-		goal.tokenBudget = tokenBudget;
-	}
 	await writeGoal(ref, goal);
 	return goal;
 }
@@ -65,7 +61,6 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 	const current = await readGoal(ref);
 	if (!current) throw new GoalNotFoundError("cannot update goal: no goal exists");
 
-	const tokenBudget = validateTokenBudget(update.tokenBudget);
 	const objective = update.objective === undefined ? current.objective : validateObjective(update.objective);
 	const now = nowSeconds();
 	const hasObjectiveUpdate = update.objective !== undefined;
@@ -73,8 +68,7 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 	const requestedStatus = update.status ?? (hasObjectiveUpdate ? "active" : undefined);
 
 	if (replacesGoal) {
-		const replacementBudget = tokenBudget === null ? undefined : tokenBudget;
-		const status = statusAfterBudgetLimit(requestedStatus ?? "active", 0, replacementBudget);
+		const status = requestedStatus ?? "active";
 		const next: Goal = {
 			id: randomUUID(),
 			threadId: ref.threadId,
@@ -85,30 +79,19 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 			createdAt: now,
 			updatedAt: now,
 		};
-		if (replacementBudget !== undefined) next.tokenBudget = replacementBudget;
 		if (status === "active") next.lastStartedAt = now;
 		if (status === "complete") next.completedAt = now;
 		await writeGoal(ref, next);
 		return next;
 	}
 
-	const nextTokenBudget = tokenBudget === null ? undefined : (tokenBudget ?? current.tokenBudget);
-	const status =
-		requestedStatus === undefined
-			? statusAfterBudgetUpdate(current.status, current.tokensUsed, nextTokenBudget)
-			: statusAfterExplicitStatusUpdate(current.status, requestedStatus, current.tokensUsed, nextTokenBudget);
+	const status = requestedStatus ?? current.status;
 	const next: Goal = {
 		...current,
 		objective,
 		status,
 		updatedAt: now,
 	};
-
-	if (tokenBudget === null) {
-		delete next.tokenBudget;
-	} else if (tokenBudget !== undefined) {
-		next.tokenBudget = tokenBudget;
-	}
 
 	if (status === "active" && current.status !== "active") {
 		next.lastStartedAt = now;
@@ -144,79 +127,28 @@ export async function accountGoalUsage(
 	if (expectedGoalId !== undefined && goal.id !== expectedGoalId) return goal;
 	if (!canAccountGoalUsage(goal, mode)) return goal;
 
-	const tokensUsed = goal.tokensUsed + goalTokenDeltaForUsage(usage);
 	const now = nowSeconds();
 	const next: Goal = {
 		...goal,
-		tokensUsed,
+		tokensUsed: goal.tokensUsed + goalTokenDeltaForUsage(usage),
 		timeUsedSeconds: goal.timeUsedSeconds + Math.max(0, Math.trunc(elapsedSeconds)),
 		updatedAt: now,
-		status: statusAfterAccounting(goal.status, tokensUsed, goal.tokenBudget, mode),
 	};
-	if (next.status === "budgetLimited") delete next.lastStartedAt;
 	await writeGoal(ref, next);
 	return next;
 }
 
 function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
 	switch (mode) {
-		case "activeStatusOnly":
-			return goal.status === "active";
 		case "active":
-			return goal.status === "active" || goal.status === "budgetLimited";
+			return goal.status === "active";
 		case "activeOrComplete":
-			return goal.status === "active" || goal.status === "budgetLimited" || goal.status === "complete";
-		case "activeOrStopped":
-			return goal.status === "active" || goal.status === "paused" || goal.status === "budgetLimited";
+			return goal.status === "active" || goal.status === "complete";
 	}
 }
 
 function goalTokenDeltaForUsage(usage: TokenUsageSnapshot): number {
 	return Math.max(0, usage.input) + Math.max(0, usage.output);
-}
-
-function statusAfterAccounting(
-	status: Goal["status"],
-	tokensUsed: number,
-	tokenBudget: number | undefined,
-	mode: GoalAccountingMode,
-): Goal["status"] {
-	if (tokenBudget === undefined || tokensUsed < tokenBudget) return status;
-	switch (mode) {
-		case "activeStatusOnly":
-		case "active":
-		case "activeOrComplete":
-			return status === "active" ? "budgetLimited" : status;
-		case "activeOrStopped":
-			return status === "active" || status === "paused" || status === "budgetLimited" ? "budgetLimited" : status;
-	}
-}
-
-function statusAfterExplicitStatusUpdate(
-	currentStatus: Goal["status"],
-	requestedStatus: Goal["status"],
-	tokensUsed: number,
-	tokenBudget: number | undefined,
-): Goal["status"] {
-	if (currentStatus === "budgetLimited" && requestedStatus === "paused") return "budgetLimited";
-	return statusAfterBudgetLimit(requestedStatus, tokensUsed, tokenBudget);
-}
-
-function statusAfterBudgetUpdate(
-	currentStatus: Goal["status"],
-	tokensUsed: number,
-	tokenBudget: number | undefined,
-): Goal["status"] {
-	if (currentStatus === "active") return statusAfterBudgetLimit(currentStatus, tokensUsed, tokenBudget);
-	return currentStatus;
-}
-
-function statusAfterBudgetLimit(
-	status: Goal["status"],
-	tokensUsed: number,
-	tokenBudget: number | undefined,
-): Goal["status"] {
-	return status === "active" && tokenBudget !== undefined && tokensUsed >= tokenBudget ? "budgetLimited" : status;
 }
 
 function parseGoalFile(raw: string): GoalFile {
@@ -247,7 +179,6 @@ function isGoal(value: unknown): value is Goal {
 		typeof value["threadId"] === "string" &&
 		typeof value["objective"] === "string" &&
 		isGoalStatus(value["status"]) &&
-		(value["tokenBudget"] === undefined || isPositiveSafeInteger(value["tokenBudget"])) &&
 		isNonNegativeSafeInteger(value["tokensUsed"]) &&
 		isNonNegativeSafeInteger(value["timeUsedSeconds"]) &&
 		isNonNegativeSafeInteger(value["createdAt"]) &&
@@ -258,11 +189,7 @@ function isGoal(value: unknown): value is Goal {
 }
 
 function isGoalStatus(value: unknown): value is Goal["status"] {
-	return value === "active" || value === "paused" || value === "budgetLimited" || value === "complete";
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-	return isSafeInteger(value) && value > 0;
+	return value === "active" || value === "paused" || value === "complete";
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
