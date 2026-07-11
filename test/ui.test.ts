@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { Goal } from "../src/goal/types.js";
 import { goalStatusText, STATUS_KEY, updateGoalUi } from "../src/goal/ui.js";

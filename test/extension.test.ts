@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import type { AgentToolResult, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { goalFilePath, readGoal } from "../src/goal/store.js";
 import type { GoalStoreRef } from "../src/goal/types.js";
@@ -526,6 +526,7 @@ function createExtensionApi(
 			return undefined;
 		},
 		registerMessageRenderer() {},
+		registerEntryRenderer() {},
 		sendMessage(message, options) {
 			sentMessages.push({
 				message: {
