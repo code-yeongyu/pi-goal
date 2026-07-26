@@ -12,6 +12,7 @@ type ToolResult = AgentToolResult<unknown>;
 
 type GoalContext = {
 	hasUI: boolean;
+	signal?: AbortSignal;
 	ui: MockUi;
 	cwd: string;
 	sessionManager: {
@@ -347,6 +348,66 @@ describe("pi-goal extension accounting", () => {
 		const persisted = await readGoal(refForContext(ctx));
 		expect(persisted).toMatchObject({ status: "blocked", tokensUsed: 120, timeUsedSeconds: 70 });
 		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("accounts an aborted active turn before blocking it and suppressing continuation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-user-abort");
+		const abortController = new AbortController();
+		ctx.signal = abortController.signal;
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(65_000);
+		abortController.abort();
+		await harness.emit(
+			"agent_end",
+			{
+				type: "agent_end",
+				messages: [
+					{
+						role: "assistant",
+						usage: { input: 100, output: 20, cacheRead: 60, cacheWrite: 0, totalTokens: 120 },
+					},
+				],
+			},
+			ctx,
+		);
+
+		expect(await readGoal(refForContext(ctx))).toMatchObject({
+			status: "blocked",
+			blockedReason: "user interrupted the turn",
+			tokensUsed: 120,
+			timeUsedSeconds: 65,
+		});
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("resumes a blocked goal only for the agent start following a real user prompt", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-user-resume");
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
+
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		expect((await readGoal(refForContext(ctx)))?.status).toBe("blocked");
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(10_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		const resumed = await readGoal(refForContext(ctx));
+		expect(resumed).toMatchObject({ status: "active", timeUsedSeconds: 10 });
+		expect(resumed).not.toHaveProperty("blockedReason");
+		expect(resumed).not.toHaveProperty("blockedAt");
 	});
 
 	it("does not check pending messages after a goal completes", async () => {
