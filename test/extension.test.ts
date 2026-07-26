@@ -457,6 +457,60 @@ describe("pi-goal extension accounting", () => {
 		expect(resumed).not.toHaveProperty("blockedAt");
 	});
 
+	it("resumes a blocked goal at before_agent_start even when admission rejects the run (no stale flag)", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-user-flag-leak");
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
+
+		// Real user prompt fires before_agent_start, but the host's final provider admission
+		// rejects the run, so NO agent_start follows (no turn performed, no accounting begun).
+		// The resume must be bound to the user's before_agent_start, NOT deferred to a sticky
+		// flag that a later continuation-style agent_start could consume.
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+
+		const afterRejectedPrompt = await readGoal(refForContext(ctx));
+		expect(afterRejectedPrompt).toMatchObject({ status: "active", timeUsedSeconds: 0 });
+		expect(afterRejectedPrompt).not.toHaveProperty("blockedReason");
+		expect(afterRejectedPrompt).not.toHaveProperty("blockedAt");
+
+		// A later continuation-style turn starts the agent WITHOUT a preceding before_agent_start.
+		// It must NOT perform a fresh resume transition; it only accounts its own turn against
+		// the already-active goal.
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(5_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		const afterContinuation = await readGoal(refForContext(ctx));
+		expect(afterContinuation).toMatchObject({ status: "active", timeUsedSeconds: 5 });
+		expect(afterContinuation).not.toHaveProperty("blockedReason");
+	});
+
+	it("does not resume a blocked goal on a continuation-style agent_start with no preceding before_agent_start", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-continuation-no-resume");
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
+
+		// A continuation-style turn (e.g. another extension's queued followUp) starts the agent
+		// without a real user prompt. agent_start must not resume a blocked goal on its own.
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(5_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		const goal = await readGoal(refForContext(ctx));
+		expect(goal).toMatchObject({ status: "blocked", timeUsedSeconds: 0 });
+		expect(goal).toHaveProperty("blockedReason", "Waiting on user input");
+	});
+
 	it("does not check pending messages after a goal completes", async () => {
 		const harness = createHarness();
 		const ctx = await createContext("thread-complete-with-stale-pending");
