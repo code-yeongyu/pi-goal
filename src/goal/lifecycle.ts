@@ -40,7 +40,6 @@ export function registerGoalLifecycle(
 	let agentGoalAccounting: AgentGoalAccounting | null = null;
 	let blockedThisTurnGoalId: string | null = null;
 	let completedThisTurnGoalId: string | null = null;
-	let nextAgentStartWasUserTriggered = false;
 	let agentAbortSignal: AbortSignal | undefined;
 	const turnUsage = new TurnUsageTracker();
 
@@ -58,22 +57,26 @@ export function registerGoalLifecycle(
 		}
 	});
 
-	pi.on("before_agent_start", async () => {
-		nextAgentStartWasUserTriggered = true;
+	pi.on("before_agent_start", async (_event, ctx) => {
+		// before_agent_start fires only for real user prompts and BEFORE the host's final
+		// provider admission check (which can reject the run so no agent_start follows).
+		// Resuming the blocked goal here, instead of deferring to agent_start via a sticky
+		// flag, means a rejected run cannot leak a stale resume signal to a later
+		// continuation-style turn that starts the agent without a preceding user prompt.
+		const goal = await readGoal(goalStoreRef(ctx));
+		if (goal?.status === "blocked") {
+			const resumed = await updateGoal(goalStoreRef(ctx), { status: "active" }, "user");
+			updateGoalUiBestEffort(ctx, resumed);
+		}
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
-		const userTriggered = nextAgentStartWasUserTriggered;
-		nextAgentStartWasUserTriggered = false;
 		agentAbortSignal = ctx.signal;
 		agentTurnInProgress = true;
 		turnUsage.reset();
 		blockedThisTurnGoalId = null;
 		completedThisTurnGoalId = null;
-		let goal = await readGoal(goalStoreRef(ctx));
-		if (userTriggered && goal?.status === "blocked") {
-			goal = await updateGoal(goalStoreRef(ctx), { status: "active" }, "user");
-		}
+		const goal = await readGoal(goalStoreRef(ctx));
 		if (goal?.status === "active") {
 			beginAgentGoalAccounting(goal);
 		} else {
