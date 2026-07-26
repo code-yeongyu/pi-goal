@@ -3,25 +3,20 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { parseGoalCommand } from "./command.js";
 import { formatGoalForTool, goalStatusLabel } from "./format.js";
 import { clearGoal, createGoal, readGoal, updateGoal } from "./store.js";
-import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./types.js";
+import type { Goal, GoalAccountingMode, GoalStoreRef } from "./types.js";
 import { updateGoalUi } from "./ui.js";
 
 const GOAL_USAGE = "Usage: /goal <objective>";
 const GOAL_EMPTY_HINT = "No goal is currently set.";
 const REPLACE_GOAL_CHOICE = "Replace current goal";
 const CANCEL_REPLACE_GOAL_CHOICE = "Cancel";
-const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 
 export type GoalCommandRegistrationDeps = {
 	goalStoreRef(ctx: ExtensionContext): GoalStoreRef;
 	beginAgentGoalAccounting(goal: Goal): void;
 	stopAgentGoalAccounting(goalId: string): void;
 	clearAgentGoalAccounting(): void;
-	accountCurrentAgentTurn(
-		ctx: ExtensionContext,
-		usage: TokenUsageSnapshot,
-		mode: GoalAccountingMode,
-	): Promise<Goal | null>;
+	accountCurrentAgentTurn(ctx: ExtensionContext, mode: GoalAccountingMode): Promise<Goal | null>;
 	queueGoalContinuation(ctx: ExtensionContext, goal: Goal): void;
 };
 
@@ -47,7 +42,7 @@ export function registerGoalCommand(pi: ExtensionAPI, deps: GoalCommandRegistrat
 					}
 					case "setStatus": {
 						if (command.status === "paused") {
-							await deps.accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+							await deps.accountCurrentAgentTurn(ctx, "active");
 						}
 						const goal = await updateGoal(deps.goalStoreRef(ctx), { status: command.status }, "user");
 						if (goal.status === "active") {
@@ -61,7 +56,7 @@ export function registerGoalCommand(pi: ExtensionAPI, deps: GoalCommandRegistrat
 						return;
 					}
 					case "clear": {
-						await deps.accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+						await deps.accountCurrentAgentTurn(ctx, "active");
 						const cleared = await clearGoal(deps.goalStoreRef(ctx));
 						deps.clearAgentGoalAccounting();
 						updateGoalUi(ctx, null);
@@ -89,7 +84,7 @@ async function setGoalObjective(
 	if (current !== null && !(await confirmReplaceGoal(ctx, objective))) return;
 
 	if (current?.status === "active") {
-		await deps.accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+		await deps.accountCurrentAgentTurn(ctx, "active");
 	}
 	const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective }, "user");
 	if (goal.status === "active") deps.beginAgentGoalAccounting(goal);

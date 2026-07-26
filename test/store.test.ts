@@ -32,6 +32,30 @@ describe("goal store (budget-free)", () => {
 		expect(fileContents).not.toContain("budget");
 	});
 
+	it("preserves inert tokenBudget metadata from existing goal files", async () => {
+		const ref = await tempStore("token-budget-wire-compat");
+		const original = await createGoal(ref, "Persist metadata only");
+		await writeFile(
+			goalFilePath(ref),
+			`${JSON.stringify({ version: 1, goal: { ...original, tokenBudget: 4_096 } })}\n`,
+			"utf8",
+		);
+
+		const loaded = await readGoal(ref);
+		const completed = await updateGoal(ref, { status: "complete" }, "model");
+
+		expect(loaded?.tokenBudget).toBe(4_096);
+		expect(completed.tokenBudget).toBe(4_096);
+		expect((await readGoal(ref))?.tokenBudget).toBe(4_096);
+
+		await writeFile(
+			goalFilePath(ref),
+			`${JSON.stringify({ version: 1, goal: { ...original, tokenBudget: -1 } })}\n`,
+			"utf8",
+		);
+		await expect(readGoal(ref)).rejects.toThrow("goal store contains an invalid goal");
+	});
+
 	it("spills a byte-identical oversized objective while storing marker-budget-aware text", async () => {
 		const ref = await tempStore("thread/oversized objective");
 		const objective = "x".repeat(4_200);

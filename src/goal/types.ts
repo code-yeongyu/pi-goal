@@ -17,6 +17,7 @@ export type Goal = {
 	threadId: string;
 	objective: string;
 	status: GoalStatus;
+	tokenBudget?: number;
 	tokensUsed: number;
 	timeUsedSeconds: number;
 	createdAt: number;
@@ -44,6 +45,7 @@ export type GoalUpdate = {
 	objective?: string;
 	status?: GoalStatus;
 	reason?: string;
+	tokenBudget?: number | null;
 };
 
 export type GoalToolSnapshot = {

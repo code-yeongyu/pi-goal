@@ -3,12 +3,10 @@ import { Type } from "typebox";
 
 import { formatGoalToolResponse } from "./format.js";
 import { createGoal, objectiveFullTextFileName, readGoal, updateGoal } from "./store.js";
-import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./types.js";
+import type { Goal, GoalAccountingMode, GoalStoreRef } from "./types.js";
 import { MODEL_SETTABLE_GOAL_STATUS_VALUES } from "./types.js";
 import { updateGoalUi } from "./ui.js";
 import { objectiveTruncationNotice, validateObjective } from "./validation.js";
-
-const EMPTY_USAGE: TokenUsageSnapshot = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
 
 type GoalToolResult = AgentToolResult<Record<string, never>>;
 
@@ -17,11 +15,7 @@ export type GoalToolRegistrationDeps = {
 	beginAgentGoalAccounting(goal: Goal): void;
 	markGoalBlockedThisTurn(goal: Goal): void;
 	markGoalCompletedThisTurn(goal: Goal): void;
-	accountCurrentAgentTurn(
-		ctx: ExtensionContext,
-		usage: TokenUsageSnapshot,
-		mode: GoalAccountingMode,
-	): Promise<Goal | null>;
+	accountCurrentAgentTurn(ctx: ExtensionContext, mode: GoalAccountingMode): Promise<Goal | null>;
 };
 
 export function registerGoalTools(pi: ExtensionAPI, deps: GoalToolRegistrationDeps): void {
@@ -89,7 +83,7 @@ export function registerGoalTools(pi: ExtensionAPI, deps: GoalToolRegistrationDe
 			if (params.status === "complete" && params.reason !== undefined) {
 				throw new Error("reason must not be provided when status is complete");
 			}
-			await deps.accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
+			await deps.accountCurrentAgentTurn(ctx, "active");
 			const goal = await updateGoal(
 				deps.goalStoreRef(ctx),
 				params.status === "blocked"
@@ -113,7 +107,7 @@ export function registerGoalTools(pi: ExtensionAPI, deps: GoalToolRegistrationDe
 		description: "Get the current goal for this thread, including status, token and elapsed-time usage.",
 		parameters: Type.Object({}, { additionalProperties: false }),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const goal = await readGoal(deps.goalStoreRef(ctx));
+			const goal = await deps.accountCurrentAgentTurn(ctx, "active");
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal));
 		},

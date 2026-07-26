@@ -19,7 +19,7 @@ import {
 	isRecord,
 	type TokenUsageSnapshot,
 } from "./types.js";
-import { validateObjective } from "./validation.js";
+import { resolveTokenBudget, validateObjective } from "./validation.js";
 
 const STORE_VERSION = 1;
 
@@ -92,6 +92,7 @@ export async function updateGoal(
 	const validatedObjective =
 		update.objective === undefined ? undefined : validateObjective(update.objective, objectiveFullTextFileName(ref));
 	const objective = validatedObjective?.objective ?? current.objective;
+	const tokenBudget = resolveTokenBudget(current.tokenBudget, update.tokenBudget);
 	const now = nextUpdatedAt(current.updatedAt);
 	const hasObjectiveUpdate = update.objective !== undefined;
 	const replacesGoal = hasObjectiveUpdate && (objective !== current.objective || current.status === "complete");
@@ -109,6 +110,7 @@ export async function updateGoal(
 			timeUsedSeconds: 0,
 			createdAt: now,
 			updatedAt: now,
+			...(tokenBudget === undefined ? {} : { tokenBudget }),
 		};
 		if (status === "active") next.lastStartedAt = now;
 		if (status === "complete") next.completedAt = now;
@@ -119,6 +121,11 @@ export async function updateGoal(
 
 	const status = requestedStatus ?? current.status;
 	const next = transitionGoalStatus({ ...current, objective }, status, source, update.reason, now);
+	if (tokenBudget === undefined) {
+		delete next.tokenBudget;
+	} else {
+		next.tokenBudget = tokenBudget;
+	}
 	if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 	await writeGoal(ref, next);
 	return next;
@@ -207,6 +214,7 @@ function isGoal(value: unknown): value is Goal {
 		typeof value["id"] === "string" &&
 		typeof value["threadId"] === "string" &&
 		typeof value["objective"] === "string" &&
+		(value["tokenBudget"] === undefined || isNonNegativeSafeInteger(value["tokenBudget"])) &&
 		hasValidBlockedFields(value, value["status"]) &&
 		isNonNegativeSafeInteger(value["tokensUsed"]) &&
 		isNonNegativeSafeInteger(value["timeUsedSeconds"]) &&

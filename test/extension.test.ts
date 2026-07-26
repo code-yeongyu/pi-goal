@@ -44,6 +44,7 @@ type RegisteredCommand = {
 type EventPayload = {
 	type: string;
 	reason?: string;
+	message?: unknown;
 	messages?: unknown[];
 };
 
@@ -245,6 +246,52 @@ describe("pi-goal extension accounting", () => {
 
 		const goal = await readGoal(refForContext(ctx));
 		expect(goal?.timeUsedSeconds).toBe(10);
+	});
+
+	it("checkpoints streamed usage for update_goal and does not double count it at agent end", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-complete");
+		const message = assistantUsageMessage(100, 50);
+		await harness.tool("create_goal").execute("c1", { objective: "Ship it" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message }, ctx);
+
+		const completed = await harness
+			.tool("update_goal")
+			.execute("u1", { status: "complete" }, undefined, undefined, ctx);
+		expect(JSON.parse(toolResultText(completed))).toMatchObject({ goal: { tokensUsed: 150 } });
+		await harness.emit("agent_end", { type: "agent_end", messages: [message] }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(150);
+	});
+
+	it("checkpoints streamed usage for get_goal and at session shutdown", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-get");
+		const message = assistantUsageMessage(100, 50);
+		await harness.tool("create_goal").execute("c1", { objective: "Ship it" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message }, ctx);
+
+		const snapshot = await harness.tool("get_goal").execute("g1", {}, undefined, undefined, ctx);
+		expect(JSON.parse(toolResultText(snapshot))).toMatchObject({ goal: { tokensUsed: 150 } });
+		await harness.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(150);
+	});
+
+	it("does not charge usage streamed before a goal is created mid-turn", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-late-goal");
+		const before = assistantUsageMessage(1000, 500);
+		const after = assistantUsageMessage(10, 5);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message: before }, ctx);
+		await harness.tool("create_goal").execute("c1", { objective: "Late goal" }, undefined, undefined, ctx);
+		await harness.emit("message_end", { type: "message_end", message: after }, ctx);
+		await harness.emit("agent_end", { type: "agent_end", messages: [before, after] }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(15);
 	});
 
 	it("accounts resumed active goal time from session start without counting offline time", async () => {
@@ -781,6 +828,13 @@ function refForContext(ctx: GoalContext): GoalStoreRef {
 	return {
 		baseDir: join(ctx.sessionManager.getSessionDir(), "extensions", "pi-goal"),
 		threadId: ctx.sessionManager.getSessionId(),
+	};
+}
+
+function assistantUsageMessage(input: number, output: number): unknown {
+	return {
+		role: "assistant",
+		usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output },
 	};
 }
 

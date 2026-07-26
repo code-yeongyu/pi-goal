@@ -25,6 +25,16 @@ export function validateObjective(value: string, fullTextFileName: string): Vali
 	};
 }
 
+export function validateTokenBudget(value: number): number {
+	if (!Number.isSafeInteger(value) || value < 0) throw new Error("tokenBudget must be a non-negative safe integer");
+	return value;
+}
+
+export function resolveTokenBudget(current: number | undefined, update: number | null | undefined): number | undefined {
+	if (update === undefined) return current;
+	return update === null ? undefined : validateTokenBudget(update);
+}
+
 export function truncationMarker(fullTextFileName: string): string {
 	return `… [truncated; full objective: ${fullTextFileName}]`;
 }
