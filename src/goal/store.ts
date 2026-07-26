@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
 	GoalAlreadyExistsError,
@@ -14,7 +14,11 @@ import { validateObjective } from "./validation.js";
 const STORE_VERSION = 1;
 
 export function goalFilePath(ref: GoalStoreRef): string {
-	return join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.json`);
+	return join(ref.baseDir, `${encodedThreadId(ref)}.json`);
+}
+
+export function goalHistoryFilePath(ref: GoalStoreRef): string {
+	return join(ref.baseDir, `${encodedThreadId(ref)}.history.jsonl`);
 }
 
 export async function readGoal(ref: GoalStoreRef): Promise<Goal | null> {
@@ -36,11 +40,12 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 }
 
 export async function createGoal(ref: GoalStoreRef, objective: string): Promise<Goal> {
-	if ((await readGoal(ref)) !== null) {
+	const normalizedObjective = validateObjective(objective);
+	const current = await readGoal(ref);
+	if (current !== null && current.status !== "complete") {
 		throw new GoalAlreadyExistsError("cannot create a new goal because this thread already has a goal");
 	}
-
-	const normalizedObjective = validateObjective(objective);
+	if (current?.status === "complete") await archiveGoal(ref, current);
 	const now = nowSeconds();
 	const goal: Goal = {
 		id: randomUUID(),
@@ -107,6 +112,12 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 
 	await writeGoal(ref, next);
 	return next;
+}
+
+export async function archiveGoal(ref: GoalStoreRef, goal: Goal): Promise<void> {
+	const filePath = goalHistoryFilePath(ref);
+	await mkdir(dirname(filePath), { recursive: true });
+	await appendFile(filePath, `${JSON.stringify(goal)}\n`, "utf8");
 }
 
 export async function clearGoal(ref: GoalStoreRef): Promise<boolean> {
@@ -198,6 +209,10 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isSafeInteger(value: unknown): value is number {
 	return Number.isSafeInteger(value);
+}
+
+function encodedThreadId(ref: GoalStoreRef): string {
+	return encodeURIComponent(ref.threadId);
 }
 
 function nowSeconds(): number {

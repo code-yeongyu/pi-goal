@@ -55,9 +55,10 @@ export default function (pi: ExtensionAPI): void {
 		),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const ref = goalStoreRef(ctx);
-			if ((await readGoal(ref)) !== null) {
+			const current = await readGoal(ref);
+			if (current !== null && current.status !== "complete") {
 				throw new Error(
-					"cannot create a new goal because this thread already has a goal; use update_goal only when the existing goal is complete",
+					"cannot create a new goal because this thread already has an unfinished goal; use update_goal only when the existing goal is complete",
 				);
 			}
 			const goal = await createGoal(ref, params.objective);

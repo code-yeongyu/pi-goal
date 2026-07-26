@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -153,14 +153,35 @@ describe("pi-goal extension tool behavior", () => {
 		expect((await readGoal(ref))?.status).toBe("complete");
 	});
 
-	it("refuses a second create_goal while a goal exists", async () => {
+	it("creates a new goal over a complete goal, archives it, and rejects unfinished goals", async () => {
 		const harness = createHarness();
-		const ctx = await createContext("thread-duplicate");
+		const completeCtx = await createContext("thread/complete-create");
+		const completeRef = refForContext(completeCtx);
 
-		await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, ctx);
-		await expect(
-			harness.tool("create_goal").execute("c2", { objective: "Second" }, undefined, undefined, ctx),
-		).rejects.toThrow("already has a goal");
+		await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, completeCtx);
+		await harness.tool("update_goal").execute("u1", { status: "complete" }, undefined, undefined, completeCtx);
+		const replacement = await harness
+			.tool("create_goal")
+			.execute("c2", { objective: "Second" }, undefined, undefined, completeCtx);
+
+		expect(JSON.parse(toolResultText(replacement))).toMatchObject({
+			goal: { objective: "Second", status: "active" },
+		});
+		const history = await readFile(
+			join(completeRef.baseDir, `${encodeURIComponent(completeRef.threadId)}.history.jsonl`),
+			"utf8",
+		);
+		expect(history.trim().split("\n")).toHaveLength(1);
+		expect(JSON.parse(history)).toMatchObject({ objective: "First", status: "complete" });
+
+		for (const status of ["active", "paused"] as const) {
+			const ctx = await createContext(`thread-${status}-duplicate`);
+			await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, ctx);
+			if (status === "paused") await harness.command("goal").handler("pause", ctx);
+			await expect(
+				harness.tool("create_goal").execute("c2", { objective: "Second" }, undefined, undefined, ctx),
+			).rejects.toThrow("unfinished goal");
+		}
 	});
 });
 

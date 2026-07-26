@@ -32,15 +32,41 @@ describe("goal store (budget-free)", () => {
 		expect(fileContents).not.toContain("budget");
 	});
 
-	it("does not replace an existing goal when createGoal is called again", async () => {
-		const ref = await tempStore("thread-duplicate-create");
+	it("replaces a completed goal and archives it as one history JSON line", async () => {
+		const ref = await tempStore("thread/complete-create");
 		const original = await createGoal(ref, "Original");
+		await updateGoal(ref, { status: "complete" });
+
+		const replacement = await createGoal(ref, "Replacement");
+
+		expect(replacement).toMatchObject({
+			objective: "Replacement",
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+		});
+		expect(replacement.id).not.toBe(original.id);
+		expect(await readGoal(ref)).toMatchObject({ id: replacement.id, objective: "Replacement" });
+		const history = await readFile(join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.history.jsonl`), "utf8");
+		const historyLines = history.trim().split("\n");
+		expect(historyLines).toHaveLength(1);
+		expect(JSON.parse(historyLines[0] ?? "")).toMatchObject({
+			id: original.id,
+			objective: "Original",
+			status: "complete",
+			completedAt: expect.any(Number),
+		});
+	});
+
+	it.each(["active", "paused"] as const)("rejects createGoal while a goal is %s", async (status) => {
+		const ref = await tempStore(`thread-${status}-create`);
+		const original = await createGoal(ref, "Original");
+		if (status === "paused") await updateGoal(ref, { status });
 
 		await expect(createGoal(ref, "Replacement")).rejects.toThrow(
 			"cannot create a new goal because this thread already has a goal",
 		);
-
-		expect(await readGoal(ref)).toMatchObject({ id: original.id, objective: "Original" });
+		expect(await readGoal(ref)).toMatchObject({ id: original.id, objective: "Original", status });
 	});
 
 	it("replaces changed objectives and preserves usage for status updates", async () => {
