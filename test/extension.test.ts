@@ -69,8 +69,10 @@ type SentMessage = {
 const tempDirs: string[] = [];
 
 describe("pi-goal extension tool contract", () => {
-	it("exposes budget-free Codex goal tools with matching descriptions and schemas", () => {
+	it("exposes budget-free v2 goal tool schemas and limit-aware guidance", () => {
 		const harness = createHarness();
+		const createGoal = toolContract(harness.tool("create_goal"));
+		const updateGoal = toolContract(harness.tool("update_goal"));
 
 		expect(toolContract(harness.tool("get_goal"))).toEqual({
 			name: "get_goal",
@@ -81,40 +83,44 @@ describe("pi-goal extension tool contract", () => {
 				additionalProperties: false,
 			},
 		});
-		expect(toolContract(harness.tool("create_goal"))).toEqual({
+		expect(createGoal).toMatchObject({
 			name: "create_goal",
-			description:
-				"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nFails if a goal already exists; use update_goal only for status.",
+			description: expect.stringContaining("4,000"),
 			parameters: {
 				type: "object",
 				required: ["objective"],
 				properties: {
 					objective: {
 						type: "string",
-						description:
-							"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
+						description: expect.stringContaining("4,000"),
 					},
 				},
 				additionalProperties: false,
 			},
 		});
-		expect(toolContract(harness.tool("update_goal"))).toEqual({
+		expect(createGoal.description).toMatch(/file/i);
+		expect(JSON.stringify(createGoal.parameters)).toMatch(/file/i);
+		expect(createGoal.description).toMatch(/complete/i);
+		expect(updateGoal).toMatchObject({
 			name: "update_goal",
-			description:
-				"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because you are stopping work.\nYou cannot use this tool to pause or resume a goal; those status changes are controlled by the user or system.\nWhen marking the goal achieved with status `complete`, report the final elapsed time and token usage from the tool result to the user.",
 			parameters: {
 				type: "object",
 				required: ["status"],
 				properties: {
 					status: {
-						anyOf: [{ type: "string", const: "complete" }],
-						description:
-							"Required. Set to complete only when the objective is achieved and no required work remains.",
+						anyOf: [
+							{ type: "string", const: "complete" },
+							{ type: "string", const: "blocked" },
+						],
 					},
+					reason: { type: "string" },
 				},
 				additionalProperties: false,
 			},
 		});
+		expect(updateGoal.description).toMatch(/3 consecutive goal turns/i);
+		expect(updateGoal.description).toMatch(/fresh blocked audit after resume/i);
+		expect(updateGoal.description).toMatch(/hard, slow, or uncertain/i);
 	});
 
 	it("never mentions token budgets in any tool definition", () => {
@@ -151,6 +157,21 @@ describe("pi-goal extension tool behavior", () => {
 
 		await harness.tool("update_goal").execute("u1", { status: "complete" }, undefined, undefined, ctx);
 		expect((await readGoal(ref))?.status).toBe("complete");
+	});
+
+	it("requires a non-empty reason to block and rejects a reason when completing", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-blocked-guard");
+		await harness.tool("create_goal").execute("c1", { objective: "Wait for a decision" }, undefined, undefined, ctx);
+
+		await expect(
+			harness.tool("update_goal").execute("u1", { status: "blocked" }, undefined, undefined, ctx),
+		).rejects.toThrow("reason is required");
+		await expect(
+			harness
+				.tool("update_goal")
+				.execute("u2", { status: "complete", reason: "not allowed" }, undefined, undefined, ctx),
+		).rejects.toThrow("reason must not be provided");
 	});
 
 	it("creates an oversized goal with a full-text spill and truncation notice", async () => {
