@@ -1,15 +1,52 @@
 export const MAX_OBJECTIVE_LENGTH = 4_000;
-const GOAL_TOO_LONG_FILE_HINT =
-	"Put longer instructions in a file and refer to that file in the goal, for example: /goal follow the instructions in docs/goal.md.";
+const WHITESPACE_LOOKBACK = 200;
 
-export function validateObjective(value: string): string {
+export type ValidatedObjective = {
+	objective: string;
+	truncated: boolean;
+	fullTextFileName?: string;
+};
+
+export function validateObjective(value: string, fullTextFileName: string): ValidatedObjective {
 	const objective = value.trim();
 	if (objective.length === 0) throw new Error("objective must not be empty");
-	const objectiveCharacters = [...objective].length;
-	if (objectiveCharacters > MAX_OBJECTIVE_LENGTH) {
-		throw new Error(
-			`Goal objective is too long: ${objectiveCharacters.toLocaleString()} characters. Limit: ${MAX_OBJECTIVE_LENGTH.toLocaleString()} characters. ${GOAL_TOO_LONG_FILE_HINT}`,
-		);
+
+	const codePoints = [...objective];
+	if (codePoints.length <= MAX_OBJECTIVE_LENGTH) return { objective, truncated: false };
+
+	const marker = truncationMarker(fullTextFileName);
+	const payloadBudget = MAX_OBJECTIVE_LENGTH - [...marker].length;
+	const whitespaceCut = nearestWhitespaceCut(codePoints, payloadBudget);
+	const payload = codePoints.slice(0, whitespaceCut ?? payloadBudget).join("");
+	return {
+		objective: `${payload}${marker}`,
+		truncated: true,
+		fullTextFileName,
+	};
+}
+
+export function validateTokenBudget(value: number): number {
+	if (!Number.isSafeInteger(value) || value < 0) throw new Error("tokenBudget must be a non-negative safe integer");
+	return value;
+}
+
+export function resolveTokenBudget(current: number | undefined, update: number | null | undefined): number | undefined {
+	if (update === undefined) return current;
+	return update === null ? undefined : validateTokenBudget(update);
+}
+
+export function truncationMarker(fullTextFileName: string): string {
+	return `… [truncated; full objective: ${fullTextFileName}]`;
+}
+
+export function objectiveTruncationNotice(fullTextFileName: string): string {
+	return `Objective was truncated; full objective saved to ${fullTextFileName}.`;
+}
+
+function nearestWhitespaceCut(codePoints: string[], payloadBudget: number): number | undefined {
+	const minimumCut = Math.max(0, payloadBudget - WHITESPACE_LOOKBACK);
+	for (let index = payloadBudget - 1; index >= minimumCut; index -= 1) {
+		if (/\s/u.test(codePoints[index] ?? "")) return index;
 	}
-	return objective;
+	return undefined;
 }

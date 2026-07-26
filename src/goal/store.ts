@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
 	GoalAlreadyExistsError,
@@ -7,14 +7,36 @@ import {
 	InvalidGoalStoreError,
 	UnsupportedGoalStoreVersionError,
 } from "./errors.js";
-import type { Goal, GoalAccountingMode, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
-import { isRecord } from "./types.js";
-import { validateObjective } from "./validation.js";
+import { transitionGoalStatus } from "./transitions.js";
+import {
+	type Goal,
+	type GoalAccountingMode,
+	type GoalFile,
+	type GoalStatus,
+	type GoalStoreRef,
+	type GoalUpdate,
+	type GoalUpdateSource,
+	isRecord,
+	type TokenUsageSnapshot,
+} from "./types.js";
+import { resolveTokenBudget, validateObjective } from "./validation.js";
 
 const STORE_VERSION = 1;
 
 export function goalFilePath(ref: GoalStoreRef): string {
-	return join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.json`);
+	return join(ref.baseDir, `${encodedThreadId(ref)}.json`);
+}
+
+export function goalHistoryFilePath(ref: GoalStoreRef): string {
+	return join(ref.baseDir, `${encodedThreadId(ref)}.history.jsonl`);
+}
+
+export function objectiveFullTextFileName(ref: GoalStoreRef): string {
+	return `${encodedThreadId(ref)}.objective-full.txt`;
+}
+
+export function objectiveFullTextFilePath(ref: GoalStoreRef): string {
+	return join(ref.baseDir, objectiveFullTextFileName(ref));
 }
 
 export async function readGoal(ref: GoalStoreRef): Promise<Goal | null> {
@@ -36,16 +58,18 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 }
 
 export async function createGoal(ref: GoalStoreRef, objective: string): Promise<Goal> {
-	if ((await readGoal(ref)) !== null) {
+	const validatedObjective = validateObjective(objective, objectiveFullTextFileName(ref));
+	const current = await readGoal(ref);
+	if (current !== null && current.status !== "complete") {
 		throw new GoalAlreadyExistsError("cannot create a new goal because this thread already has a goal");
 	}
-
-	const normalizedObjective = validateObjective(objective);
+	if (validatedObjective.truncated) await writeFullObjectiveText(ref, objective);
+	if (current?.status === "complete") await archiveGoal(ref, current);
 	const now = nowSeconds();
 	const goal: Goal = {
 		id: randomUUID(),
 		threadId: ref.threadId,
-		objective: normalizedObjective,
+		objective: validatedObjective.objective,
 		status: "active",
 		tokensUsed: 0,
 		timeUsedSeconds: 0,
@@ -57,18 +81,26 @@ export async function createGoal(ref: GoalStoreRef, objective: string): Promise<
 	return goal;
 }
 
-export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise<Goal> {
+export async function updateGoal(
+	ref: GoalStoreRef,
+	update: GoalUpdate,
+	source: GoalUpdateSource = "model",
+): Promise<Goal> {
 	const current = await readGoal(ref);
 	if (!current) throw new GoalNotFoundError("cannot update goal: no goal exists");
 
-	const objective = update.objective === undefined ? current.objective : validateObjective(update.objective);
-	const now = nowSeconds();
+	const validatedObjective =
+		update.objective === undefined ? undefined : validateObjective(update.objective, objectiveFullTextFileName(ref));
+	const objective = validatedObjective?.objective ?? current.objective;
+	const tokenBudget = resolveTokenBudget(current.tokenBudget, update.tokenBudget);
+	const now = nextUpdatedAt(current.updatedAt);
 	const hasObjectiveUpdate = update.objective !== undefined;
 	const replacesGoal = hasObjectiveUpdate && (objective !== current.objective || current.status === "complete");
 	const requestedStatus = update.status ?? (hasObjectiveUpdate ? "active" : undefined);
 
 	if (replacesGoal) {
 		const status = requestedStatus ?? "active";
+		if (status === "blocked") throw new Error("objective replacement cannot create a blocked goal");
 		const next: Goal = {
 			id: randomUUID(),
 			threadId: ref.threadId,
@@ -78,35 +110,37 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 			timeUsedSeconds: 0,
 			createdAt: now,
 			updatedAt: now,
+			...(tokenBudget === undefined ? {} : { tokenBudget }),
 		};
 		if (status === "active") next.lastStartedAt = now;
 		if (status === "complete") next.completedAt = now;
+		if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 		await writeGoal(ref, next);
 		return next;
 	}
 
 	const status = requestedStatus ?? current.status;
-	const next: Goal = {
-		...current,
-		objective,
-		status,
-		updatedAt: now,
-	};
-
-	if (status === "active" && current.status !== "active") {
-		next.lastStartedAt = now;
-	} else if (status !== "active") {
-		delete next.lastStartedAt;
-	}
-
-	if (status === "complete") {
-		next.completedAt = current.completedAt ?? now;
+	const next = transitionGoalStatus({ ...current, objective }, status, source, update.reason, now);
+	if (tokenBudget === undefined) {
+		delete next.tokenBudget;
 	} else {
-		delete next.completedAt;
+		next.tokenBudget = tokenBudget;
 	}
-
+	if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 	await writeGoal(ref, next);
 	return next;
+}
+
+export async function archiveGoal(ref: GoalStoreRef, goal: Goal): Promise<void> {
+	const filePath = goalHistoryFilePath(ref);
+	await mkdir(dirname(filePath), { recursive: true });
+	await appendFile(filePath, `${JSON.stringify(goal)}\n`, "utf8");
+}
+
+async function writeFullObjectiveText(ref: GoalStoreRef, objective: string): Promise<void> {
+	const filePath = objectiveFullTextFilePath(ref);
+	await mkdir(dirname(filePath), { recursive: true });
+	await writeFile(filePath, objective, "utf8");
 }
 
 export async function clearGoal(ref: GoalStoreRef): Promise<boolean> {
@@ -127,7 +161,7 @@ export async function accountGoalUsage(
 	if (expectedGoalId !== undefined && goal.id !== expectedGoalId) return goal;
 	if (!canAccountGoalUsage(goal, mode)) return goal;
 
-	const now = nowSeconds();
+	const now = nextUpdatedAt(goal.updatedAt);
 	const next: Goal = {
 		...goal,
 		tokensUsed: goal.tokensUsed + goalTokenDeltaForUsage(usage),
@@ -142,6 +176,8 @@ function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
 	switch (mode) {
 		case "active":
 			return goal.status === "active";
+		case "activeOrBlocked":
+			return goal.status === "active" || goal.status === "blocked";
 		case "activeOrComplete":
 			return goal.status === "active" || goal.status === "complete";
 	}
@@ -173,12 +209,13 @@ function isErrorWithCode(error: unknown): error is Error & { code: string } {
 }
 
 function isGoal(value: unknown): value is Goal {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !isGoalStatus(value["status"])) return false;
 	return (
 		typeof value["id"] === "string" &&
 		typeof value["threadId"] === "string" &&
 		typeof value["objective"] === "string" &&
-		isGoalStatus(value["status"]) &&
+		(value["tokenBudget"] === undefined || isNonNegativeSafeInteger(value["tokenBudget"])) &&
+		hasValidBlockedFields(value, value["status"]) &&
 		isNonNegativeSafeInteger(value["tokensUsed"]) &&
 		isNonNegativeSafeInteger(value["timeUsedSeconds"]) &&
 		isNonNegativeSafeInteger(value["createdAt"]) &&
@@ -188,8 +225,19 @@ function isGoal(value: unknown): value is Goal {
 	);
 }
 
-function isGoalStatus(value: unknown): value is Goal["status"] {
-	return value === "active" || value === "paused" || value === "complete";
+function hasValidBlockedFields(value: Record<string, unknown>, status: GoalStatus): boolean {
+	if (status === "blocked") {
+		return (
+			typeof value["blockedReason"] === "string" &&
+			value["blockedReason"].trim().length > 0 &&
+			isNonNegativeSafeInteger(value["blockedAt"])
+		);
+	}
+	return value["blockedReason"] === undefined && value["blockedAt"] === undefined;
+}
+
+function isGoalStatus(value: unknown): value is GoalStatus {
+	return value === "active" || value === "paused" || value === "blocked" || value === "complete";
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
@@ -198,6 +246,14 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 function isSafeInteger(value: unknown): value is number {
 	return Number.isSafeInteger(value);
+}
+
+function encodedThreadId(ref: GoalStoreRef): string {
+	return encodeURIComponent(ref.threadId);
+}
+
+function nextUpdatedAt(previousUpdatedAt: number): number {
+	return Math.max(nowSeconds(), previousUpdatedAt + 1);
 }
 
 function nowSeconds(): number {

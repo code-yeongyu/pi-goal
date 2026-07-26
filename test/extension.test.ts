@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -12,6 +12,7 @@ type ToolResult = AgentToolResult<unknown>;
 
 type GoalContext = {
 	hasUI: boolean;
+	signal?: AbortSignal;
 	ui: MockUi;
 	cwd: string;
 	sessionManager: {
@@ -43,6 +44,7 @@ type RegisteredCommand = {
 type EventPayload = {
 	type: string;
 	reason?: string;
+	message?: unknown;
 	messages?: unknown[];
 };
 
@@ -69,8 +71,10 @@ type SentMessage = {
 const tempDirs: string[] = [];
 
 describe("pi-goal extension tool contract", () => {
-	it("exposes budget-free Codex goal tools with matching descriptions and schemas", () => {
+	it("exposes budget-free v2 goal tool schemas and limit-aware guidance", () => {
 		const harness = createHarness();
+		const createGoal = toolContract(harness.tool("create_goal"));
+		const updateGoal = toolContract(harness.tool("update_goal"));
 
 		expect(toolContract(harness.tool("get_goal"))).toEqual({
 			name: "get_goal",
@@ -81,40 +85,44 @@ describe("pi-goal extension tool contract", () => {
 				additionalProperties: false,
 			},
 		});
-		expect(toolContract(harness.tool("create_goal"))).toEqual({
+		expect(createGoal).toMatchObject({
 			name: "create_goal",
-			description:
-				"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nFails if a goal already exists; use update_goal only for status.",
+			description: expect.stringContaining("4,000"),
 			parameters: {
 				type: "object",
 				required: ["objective"],
 				properties: {
 					objective: {
 						type: "string",
-						description:
-							"Required. The concrete objective to start pursuing. This starts a new active goal only when no goal is currently defined; if a goal already exists, this tool fails.",
+						description: expect.stringContaining("4,000"),
 					},
 				},
 				additionalProperties: false,
 			},
 		});
-		expect(toolContract(harness.tool("update_goal"))).toEqual({
+		expect(createGoal.description).toMatch(/file/i);
+		expect(JSON.stringify(createGoal.parameters)).toMatch(/file/i);
+		expect(createGoal.description).toMatch(/complete/i);
+		expect(updateGoal).toMatchObject({
 			name: "update_goal",
-			description:
-				"Update the existing goal.\nUse this tool only to mark the goal achieved.\nSet status to `complete` only when the objective has actually been achieved and no required work remains.\nDo not mark a goal complete merely because you are stopping work.\nYou cannot use this tool to pause or resume a goal; those status changes are controlled by the user or system.\nWhen marking the goal achieved with status `complete`, report the final elapsed time and token usage from the tool result to the user.",
 			parameters: {
 				type: "object",
 				required: ["status"],
 				properties: {
 					status: {
-						anyOf: [{ type: "string", const: "complete" }],
-						description:
-							"Required. Set to complete only when the objective is achieved and no required work remains.",
+						anyOf: [
+							{ type: "string", const: "complete" },
+							{ type: "string", const: "blocked" },
+						],
 					},
+					reason: { type: "string" },
 				},
 				additionalProperties: false,
 			},
 		});
+		expect(updateGoal.description).toMatch(/3 consecutive goal turns/i);
+		expect(updateGoal.description).toMatch(/fresh blocked audit after resume/i);
+		expect(updateGoal.description).toMatch(/hard, slow, or uncertain/i);
 	});
 
 	it("never mentions token budgets in any tool definition", () => {
@@ -153,14 +161,65 @@ describe("pi-goal extension tool behavior", () => {
 		expect((await readGoal(ref))?.status).toBe("complete");
 	});
 
-	it("refuses a second create_goal while a goal exists", async () => {
+	it("requires a non-empty reason to block and rejects a reason when completing", async () => {
 		const harness = createHarness();
-		const ctx = await createContext("thread-duplicate");
+		const ctx = await createContext("thread-blocked-guard");
+		await harness.tool("create_goal").execute("c1", { objective: "Wait for a decision" }, undefined, undefined, ctx);
 
-		await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, ctx);
 		await expect(
-			harness.tool("create_goal").execute("c2", { objective: "Second" }, undefined, undefined, ctx),
-		).rejects.toThrow("already has a goal");
+			harness.tool("update_goal").execute("u1", { status: "blocked" }, undefined, undefined, ctx),
+		).rejects.toThrow("reason is required");
+		await expect(
+			harness
+				.tool("update_goal")
+				.execute("u2", { status: "complete", reason: "not allowed" }, undefined, undefined, ctx),
+		).rejects.toThrow("reason must not be provided");
+	});
+
+	it("creates an oversized goal with a full-text spill and truncation notice", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread/oversized objective");
+		const ref = refForContext(ctx);
+		const objective = "x".repeat(4_200);
+
+		const result = await harness.tool("create_goal").execute("c1", { objective }, undefined, undefined, ctx);
+
+		expect(toolResultText(result)).toContain("Objective was truncated; full objective saved to");
+		expect((await readGoal(ref))?.objective).toContain("[truncated; full objective:");
+		expect(await readFile(join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.objective-full.txt`), "utf8")).toBe(
+			objective,
+		);
+	});
+
+	it("creates a new goal over a complete goal, archives it, and rejects unfinished goals", async () => {
+		const harness = createHarness();
+		const completeCtx = await createContext("thread/complete-create");
+		const completeRef = refForContext(completeCtx);
+
+		await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, completeCtx);
+		await harness.tool("update_goal").execute("u1", { status: "complete" }, undefined, undefined, completeCtx);
+		const replacement = await harness
+			.tool("create_goal")
+			.execute("c2", { objective: "Second" }, undefined, undefined, completeCtx);
+
+		expect(JSON.parse(toolResultText(replacement))).toMatchObject({
+			goal: { objective: "Second", status: "active" },
+		});
+		const history = await readFile(
+			join(completeRef.baseDir, `${encodeURIComponent(completeRef.threadId)}.history.jsonl`),
+			"utf8",
+		);
+		expect(history.trim().split("\n")).toHaveLength(1);
+		expect(JSON.parse(history)).toMatchObject({ objective: "First", status: "complete" });
+
+		for (const status of ["active", "paused"] as const) {
+			const ctx = await createContext(`thread-${status}-duplicate`);
+			await harness.tool("create_goal").execute("c1", { objective: "First" }, undefined, undefined, ctx);
+			if (status === "paused") await harness.command("goal").handler("pause", ctx);
+			await expect(
+				harness.tool("create_goal").execute("c2", { objective: "Second" }, undefined, undefined, ctx),
+			).rejects.toThrow("unfinished goal");
+		}
 	});
 });
 
@@ -187,6 +246,52 @@ describe("pi-goal extension accounting", () => {
 
 		const goal = await readGoal(refForContext(ctx));
 		expect(goal?.timeUsedSeconds).toBe(10);
+	});
+
+	it("checkpoints streamed usage for update_goal and does not double count it at agent end", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-complete");
+		const message = assistantUsageMessage(100, 50);
+		await harness.tool("create_goal").execute("c1", { objective: "Ship it" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message }, ctx);
+
+		const completed = await harness
+			.tool("update_goal")
+			.execute("u1", { status: "complete" }, undefined, undefined, ctx);
+		expect(JSON.parse(toolResultText(completed))).toMatchObject({ goal: { tokensUsed: 150 } });
+		await harness.emit("agent_end", { type: "agent_end", messages: [message] }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(150);
+	});
+
+	it("checkpoints streamed usage for get_goal and at session shutdown", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-get");
+		const message = assistantUsageMessage(100, 50);
+		await harness.tool("create_goal").execute("c1", { objective: "Ship it" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message }, ctx);
+
+		const snapshot = await harness.tool("get_goal").execute("g1", {}, undefined, undefined, ctx);
+		expect(JSON.parse(toolResultText(snapshot))).toMatchObject({ goal: { tokensUsed: 150 } });
+		await harness.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(150);
+	});
+
+	it("does not charge usage streamed before a goal is created mid-turn", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread-streamed-late-goal");
+		const before = assistantUsageMessage(1000, 500);
+		const after = assistantUsageMessage(10, 5);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		await harness.emit("message_end", { type: "message_end", message: before }, ctx);
+		await harness.tool("create_goal").execute("c1", { objective: "Late goal" }, undefined, undefined, ctx);
+		await harness.emit("message_end", { type: "message_end", message: after }, ctx);
+		await harness.emit("agent_end", { type: "agent_end", messages: [before, after] }, ctx);
+
+		expect((await readGoal(refForContext(ctx)))?.tokensUsed).toBe(15);
 	});
 
 	it("accounts resumed active goal time from session start without counting offline time", async () => {
@@ -254,6 +359,102 @@ describe("pi-goal extension accounting", () => {
 		const finalizedGoal = await readGoal(refForContext(ctx));
 		expect(finalizedGoal?.tokensUsed).toBe(120);
 		expect(finalizedGoal?.timeUsedSeconds).toBe(70);
+	});
+
+	it("accounts a blocked active turn before suppressing its continuation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-blocked-during-turn");
+
+		await harness.tool("create_goal").execute("c1", { objective: "Wait for a decision" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(65_000);
+		const blocked = await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on a product decision" }, undefined, undefined, ctx);
+
+		expect(JSON.parse(toolResultText(blocked))).toMatchObject({
+			goal: { status: "blocked", blockedReason: "Waiting on a product decision", timeUsedSeconds: 65 },
+		});
+		vi.advanceTimersByTime(5_000);
+		await harness.emit(
+			"agent_end",
+			{
+				type: "agent_end",
+				messages: [
+					{
+						role: "assistant",
+						usage: { input: 100, output: 20, cacheRead: 60, cacheWrite: 0, totalTokens: 120 },
+					},
+				],
+			},
+			ctx,
+		);
+
+		const persisted = await readGoal(refForContext(ctx));
+		expect(persisted).toMatchObject({ status: "blocked", tokensUsed: 120, timeUsedSeconds: 70 });
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("accounts an aborted active turn before blocking it and suppressing continuation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-user-abort");
+		const abortController = new AbortController();
+		ctx.signal = abortController.signal;
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(65_000);
+		abortController.abort();
+		await harness.emit(
+			"agent_end",
+			{
+				type: "agent_end",
+				messages: [
+					{
+						role: "assistant",
+						usage: { input: 100, output: 20, cacheRead: 60, cacheWrite: 0, totalTokens: 120 },
+					},
+				],
+			},
+			ctx,
+		);
+
+		expect(await readGoal(refForContext(ctx))).toMatchObject({
+			status: "blocked",
+			blockedReason: "user interrupted the turn",
+			tokensUsed: 120,
+			timeUsedSeconds: 65,
+		});
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("resumes a blocked goal only for the agent start following a real user prompt", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-user-resume");
+		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
+
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		expect((await readGoal(refForContext(ctx)))?.status).toBe("blocked");
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(10_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		const resumed = await readGoal(refForContext(ctx));
+		expect(resumed).toMatchObject({ status: "active", timeUsedSeconds: 10 });
+		expect(resumed).not.toHaveProperty("blockedReason");
+		expect(resumed).not.toHaveProperty("blockedAt");
 	});
 
 	it("does not check pending messages after a goal completes", async () => {
@@ -627,6 +828,13 @@ function refForContext(ctx: GoalContext): GoalStoreRef {
 	return {
 		baseDir: join(ctx.sessionManager.getSessionDir(), "extensions", "pi-goal"),
 		threadId: ctx.sessionManager.getSessionId(),
+	};
+}
+
+function assistantUsageMessage(input: number, output: number): unknown {
+	return {
+		role: "assistant",
+		usage: { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output },
 	};
 }
 

@@ -28,17 +28,24 @@ Goals are stored under Pi's active session directory, keyed by session id. If Pi
 
 ## Agent Tools
 
-- `create_goal({ objective, token_budget? })` creates a new active goal. This follows Codex's model-facing schema.
-- `update_goal({ status: "complete" })` only marks the current goal complete. Pause, resume, budget-limited, and clear transitions are user/system controlled.
+- `create_goal({ objective })` creates a new active goal. Objectives are limited to 4,000 characters; oversized objectives are truncated with the full text saved beside the goal store.
+- `update_goal({ status: "complete" })` marks the current goal complete.
+- `update_goal({ status: "blocked", reason })` records a repeated blocking condition and its reason.
 - `get_goal({})` returns the current goal summary.
 
-Statuses are `active`, `paused`, `budgetLimited`, and `complete`. When a goal reaches its token budget, the extension marks it `budgetLimited` and queues a prompt asking the agent to summarize remaining work instead of silently continuing.
+Statuses are `active`, `paused`, `blocked`, and `complete`. Pause and resume remain user/system controlled.
 
 ## TUI Behavior
 
-When a goal exists, pi keeps the normal footer information and renders the Codex-style goal indicator on the bottom-right footer line: `Pursuing goal (...)`, `Goal paused (/goal resume)`, `Goal unmet (...)`, or `Goal achieved (...)`. The older below-editor goal widget is cleared.
+When a goal exists, pi keeps the normal footer information and renders the Codex-style goal indicator on the bottom-right footer line: `Pursuing goal (...)`, `Goal paused (/goal resume)`, `Goal blocked`, or `Goal achieved (...)`. The older below-editor goal widget is cleared.
 
 On session start, after `/goal <objective>`, after `/goal resume`, and after every agent turn that leaves the goal `active`, the extension queues Codex's goal continuation prompt as hidden model-visible context. The objective is XML-escaped and wrapped as untrusted user data so it does not become higher-priority instructions.
+
+## Blocked goals
+
+Use `update_goal` with `status: "blocked"` only after the same blocking condition has recurred for at least three consecutive goal turns. A resumed goal starts a fresh audit; do not block a goal merely because work is hard, slow, or uncertain.
+
+If an active turn ends with `ctx.signal.aborted`, pi-goal records `user interrupted the turn` and suppresses continuation. The next real user prompt resumes that blocked goal before accounting starts; goal-continuation messages do not resume it. The published extension API exposes no abort source, so this `ctx.signal` heuristic cannot distinguish user-initiated aborts from system aborts and may label a non-user abort as `user interrupted the turn`. Follow-up: upstream an `aborted` flag and abort-source field in the published extension API.
 
 ## Development
 
