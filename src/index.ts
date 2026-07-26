@@ -45,6 +45,7 @@ type AgentGoalAccounting = {
 export default function (pi: ExtensionAPI): void {
 	let agentTurnInProgress = false;
 	let agentGoalAccounting: AgentGoalAccounting | null = null;
+	let blockedThisTurnGoalId: string | null = null;
 	let completedThisTurnGoalId: string | null = null;
 
 	pi.registerTool({
@@ -111,12 +112,19 @@ export default function (pi: ExtensionAPI): void {
 			if (params.status === "complete" && params.reason !== undefined) {
 				throw new Error("reason must not be provided when status is complete");
 			}
-			if (params.status === "blocked") {
-				throw new Error("blocked goals require the blocked lifecycle state machine");
-			}
 			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
-			const goal = await updateGoal(goalStoreRef(ctx), { status: "complete" });
-			markGoalCompletedThisTurn(goal);
+			const goal = await updateGoal(
+				goalStoreRef(ctx),
+				params.status === "blocked"
+					? { status: "blocked", ...(reason === undefined ? {} : { reason }) }
+					: { status: "complete" },
+				"model",
+			);
+			if (goal.status === "blocked") {
+				markGoalBlockedThisTurn(goal);
+			} else {
+				markGoalCompletedThisTurn(goal);
+			}
 			updateGoalUi(ctx, goal);
 			return toolText(formatGoalToolResponse(goal));
 		},
@@ -157,7 +165,7 @@ export default function (pi: ExtensionAPI): void {
 						if (command.status === "paused") {
 							await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
 						}
-						const goal = await updateGoal(goalStoreRef(ctx), { status: command.status });
+						const goal = await updateGoal(goalStoreRef(ctx), { status: command.status }, "user");
 						if (goal.status === "active") {
 							beginAgentGoalAccounting(goal);
 						} else {
@@ -204,6 +212,7 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("agent_start", async (_event, ctx) => {
 		agentTurnInProgress = true;
+		blockedThisTurnGoalId = null;
 		completedThisTurnGoalId = null;
 		const goal = await readGoal(goalStoreRef(ctx));
 		if (goal?.status === "active") {
@@ -214,9 +223,15 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		const mode: GoalAccountingMode = completedThisTurnGoalId === null ? "active" : "activeOrComplete";
+		const mode: GoalAccountingMode =
+			blockedThisTurnGoalId !== null
+				? "activeOrBlocked"
+				: completedThisTurnGoalId === null
+					? "active"
+					: "activeOrComplete";
 		const goal = await accountCurrentAgentTurn(ctx, collectAssistantUsage(event.messages), mode);
 		agentTurnInProgress = false;
+		blockedThisTurnGoalId = null;
 		completedThisTurnGoalId = null;
 		if (goal?.status === "active") {
 			beginAgentGoalAccounting(goal);
@@ -247,7 +262,7 @@ export default function (pi: ExtensionAPI): void {
 		if (current?.status === "active") {
 			await accountCurrentAgentTurn(ctx, EMPTY_USAGE, "active");
 		}
-		const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective });
+		const goal = current === null ? await createGoal(ref, objective) : await updateGoal(ref, { objective }, "user");
 		if (goal.status === "active") beginAgentGoalAccounting(goal);
 		updateGoalUi(ctx, goal);
 		ctx.ui.notify(`Goal ${goalStatusLabel(goal.status)}\n${formatGoalForTool(goal)}`, "info");
@@ -279,7 +294,7 @@ export default function (pi: ExtensionAPI): void {
 		]);
 		if (choice !== RESUME_GOAL_CHOICE) return true;
 
-		const resumed = await updateGoal(goalStoreRef(ctx), { status: "active" });
+		const resumed = await updateGoal(goalStoreRef(ctx), { status: "active" }, "user");
 		beginAgentGoalAccounting(resumed);
 		updateGoalUi(ctx, resumed);
 		ctx.ui.notify(`Goal ${goalStatusLabel(resumed.status)}\n${formatGoalForTool(resumed)}`, "info");
@@ -293,6 +308,11 @@ export default function (pi: ExtensionAPI): void {
 		agentGoalAccounting = { goalId: goal.id, measuredFromMilliseconds: Date.now() };
 	}
 
+	function markGoalBlockedThisTurn(goal: Goal): void {
+		if (!agentTurnInProgress) return;
+		blockedThisTurnGoalId = goal.id;
+	}
+
 	function markGoalCompletedThisTurn(goal: Goal): void {
 		if (!agentTurnInProgress) return;
 		completedThisTurnGoalId = goal.id;
@@ -303,6 +323,9 @@ export default function (pi: ExtensionAPI): void {
 		if (agentGoalAccounting?.goalId === goalId) {
 			agentGoalAccounting = null;
 		}
+		if (blockedThisTurnGoalId === goalId) {
+			blockedThisTurnGoalId = null;
+		}
 		if (completedThisTurnGoalId === goalId) {
 			completedThisTurnGoalId = null;
 		}
@@ -310,6 +333,7 @@ export default function (pi: ExtensionAPI): void {
 
 	function clearAgentGoalAccounting(): void {
 		agentGoalAccounting = null;
+		blockedThisTurnGoalId = null;
 		completedThisTurnGoalId = null;
 	}
 

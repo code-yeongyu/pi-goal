@@ -17,6 +17,8 @@ export function goalStatusText(goal: Goal): string {
 				: "Pursuing goal";
 		case "paused":
 			return "Goal paused (/goal resume)";
+		case "blocked":
+			return "Goal blocked";
 		case "complete":
 			return "Goal achieved";
 	}

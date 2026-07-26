@@ -7,8 +7,18 @@ import {
 	InvalidGoalStoreError,
 	UnsupportedGoalStoreVersionError,
 } from "./errors.js";
-import type { Goal, GoalAccountingMode, GoalFile, GoalStoreRef, GoalUpdate, TokenUsageSnapshot } from "./types.js";
-import { isRecord } from "./types.js";
+import { transitionGoalStatus } from "./transitions.js";
+import {
+	type Goal,
+	type GoalAccountingMode,
+	type GoalFile,
+	type GoalStatus,
+	type GoalStoreRef,
+	type GoalUpdate,
+	type GoalUpdateSource,
+	isRecord,
+	type TokenUsageSnapshot,
+} from "./types.js";
 import { validateObjective } from "./validation.js";
 
 const STORE_VERSION = 1;
@@ -71,21 +81,25 @@ export async function createGoal(ref: GoalStoreRef, objective: string): Promise<
 	return goal;
 }
 
-export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise<Goal> {
+export async function updateGoal(
+	ref: GoalStoreRef,
+	update: GoalUpdate,
+	source: GoalUpdateSource = "model",
+): Promise<Goal> {
 	const current = await readGoal(ref);
 	if (!current) throw new GoalNotFoundError("cannot update goal: no goal exists");
 
 	const validatedObjective =
 		update.objective === undefined ? undefined : validateObjective(update.objective, objectiveFullTextFileName(ref));
 	const objective = validatedObjective?.objective ?? current.objective;
-	if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
-	const now = nowSeconds();
+	const now = nextUpdatedAt(current.updatedAt);
 	const hasObjectiveUpdate = update.objective !== undefined;
 	const replacesGoal = hasObjectiveUpdate && (objective !== current.objective || current.status === "complete");
 	const requestedStatus = update.status ?? (hasObjectiveUpdate ? "active" : undefined);
 
 	if (replacesGoal) {
 		const status = requestedStatus ?? "active";
+		if (status === "blocked") throw new Error("objective replacement cannot create a blocked goal");
 		const next: Goal = {
 			id: randomUUID(),
 			threadId: ref.threadId,
@@ -98,30 +112,14 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 		};
 		if (status === "active") next.lastStartedAt = now;
 		if (status === "complete") next.completedAt = now;
+		if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 		await writeGoal(ref, next);
 		return next;
 	}
 
 	const status = requestedStatus ?? current.status;
-	const next: Goal = {
-		...current,
-		objective,
-		status,
-		updatedAt: now,
-	};
-
-	if (status === "active" && current.status !== "active") {
-		next.lastStartedAt = now;
-	} else if (status !== "active") {
-		delete next.lastStartedAt;
-	}
-
-	if (status === "complete") {
-		next.completedAt = current.completedAt ?? now;
-	} else {
-		delete next.completedAt;
-	}
-
+	const next = transitionGoalStatus({ ...current, objective }, status, source, update.reason, now);
+	if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 	await writeGoal(ref, next);
 	return next;
 }
@@ -156,7 +154,7 @@ export async function accountGoalUsage(
 	if (expectedGoalId !== undefined && goal.id !== expectedGoalId) return goal;
 	if (!canAccountGoalUsage(goal, mode)) return goal;
 
-	const now = nowSeconds();
+	const now = nextUpdatedAt(goal.updatedAt);
 	const next: Goal = {
 		...goal,
 		tokensUsed: goal.tokensUsed + goalTokenDeltaForUsage(usage),
@@ -171,6 +169,8 @@ function canAccountGoalUsage(goal: Goal, mode: GoalAccountingMode): boolean {
 	switch (mode) {
 		case "active":
 			return goal.status === "active";
+		case "activeOrBlocked":
+			return goal.status === "active" || goal.status === "blocked";
 		case "activeOrComplete":
 			return goal.status === "active" || goal.status === "complete";
 	}
@@ -202,12 +202,12 @@ function isErrorWithCode(error: unknown): error is Error & { code: string } {
 }
 
 function isGoal(value: unknown): value is Goal {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !isGoalStatus(value["status"])) return false;
 	return (
 		typeof value["id"] === "string" &&
 		typeof value["threadId"] === "string" &&
 		typeof value["objective"] === "string" &&
-		isGoalStatus(value["status"]) &&
+		hasValidBlockedFields(value, value["status"]) &&
 		isNonNegativeSafeInteger(value["tokensUsed"]) &&
 		isNonNegativeSafeInteger(value["timeUsedSeconds"]) &&
 		isNonNegativeSafeInteger(value["createdAt"]) &&
@@ -217,8 +217,19 @@ function isGoal(value: unknown): value is Goal {
 	);
 }
 
-function isGoalStatus(value: unknown): value is Goal["status"] {
-	return value === "active" || value === "paused" || value === "complete";
+function hasValidBlockedFields(value: Record<string, unknown>, status: GoalStatus): boolean {
+	if (status === "blocked") {
+		return (
+			typeof value["blockedReason"] === "string" &&
+			value["blockedReason"].trim().length > 0 &&
+			isNonNegativeSafeInteger(value["blockedAt"])
+		);
+	}
+	return value["blockedReason"] === undefined && value["blockedAt"] === undefined;
+}
+
+function isGoalStatus(value: unknown): value is GoalStatus {
+	return value === "active" || value === "paused" || value === "blocked" || value === "complete";
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
@@ -231,6 +242,10 @@ function isSafeInteger(value: unknown): value is number {
 
 function encodedThreadId(ref: GoalStoreRef): string {
 	return encodeURIComponent(ref.threadId);
+}
+
+function nextUpdatedAt(previousUpdatedAt: number): number {
+	return Math.max(nowSeconds(), previousUpdatedAt + 1);
 }
 
 function nowSeconds(): number {

@@ -313,6 +313,42 @@ describe("pi-goal extension accounting", () => {
 		expect(finalizedGoal?.timeUsedSeconds).toBe(70);
 	});
 
+	it("accounts a blocked active turn before suppressing its continuation", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-blocked-during-turn");
+
+		await harness.tool("create_goal").execute("c1", { objective: "Wait for a decision" }, undefined, undefined, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(65_000);
+		const blocked = await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on a product decision" }, undefined, undefined, ctx);
+
+		expect(JSON.parse(toolResultText(blocked))).toMatchObject({
+			goal: { status: "blocked", blockedReason: "Waiting on a product decision", timeUsedSeconds: 65 },
+		});
+		vi.advanceTimersByTime(5_000);
+		await harness.emit(
+			"agent_end",
+			{
+				type: "agent_end",
+				messages: [
+					{
+						role: "assistant",
+						usage: { input: 100, output: 20, cacheRead: 60, cacheWrite: 0, totalTokens: 120 },
+					},
+				],
+			},
+			ctx,
+		);
+
+		const persisted = await readGoal(refForContext(ctx));
+		expect(persisted).toMatchObject({ status: "blocked", tokensUsed: 120, timeUsedSeconds: 70 });
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
 	it("does not check pending messages after a goal completes", async () => {
 		const harness = createHarness();
 		const ctx = await createContext("thread-complete-with-stale-pending");

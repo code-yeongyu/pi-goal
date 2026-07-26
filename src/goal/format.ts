@@ -32,6 +32,8 @@ export function goalStatusLabel(status: GoalStatus): string {
 			return "active";
 		case "paused":
 			return "paused";
+		case "blocked":
+			return "blocked";
 		case "complete":
 			return "complete";
 	}
@@ -45,6 +47,7 @@ export function formatGoalForTool(goal: Goal | null): string {
 		`Time used: ${formatGoalElapsedSeconds(goal.timeUsedSeconds)}`,
 		`Tokens used: ${formatTokensCompact(goal.tokensUsed)}`,
 	];
+	if (goal.blockedReason) lines.push(`Blocked reason: ${goal.blockedReason}`);
 	if (goal.completedAt) lines.push(`Completed at: ${new Date(goal.completedAt * 1000).toISOString()}`);
 	return lines.join("\n");
 }
@@ -67,6 +70,8 @@ function goalToolSnapshot(goal: Goal): GoalToolSnapshot {
 		timeUsedSeconds: goal.timeUsedSeconds,
 		createdAt: goal.createdAt,
 		updatedAt: goal.updatedAt,
+		...(goal.blockedReason === undefined ? {} : { blockedReason: goal.blockedReason }),
+		...(goal.blockedAt === undefined ? {} : { blockedAt: goal.blockedAt }),
 	};
 }
 

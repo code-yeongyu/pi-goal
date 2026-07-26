@@ -38,6 +38,17 @@ describe("goal display formatting", () => {
 		expect(text.toLowerCase()).not.toContain("remaining");
 	});
 
+	it("renders a blocked goal with its reason", () => {
+		const blocked = testGoal({
+			status: "blocked",
+			blockedReason: "Waiting on a product decision",
+			blockedAt: 1_777_766_450,
+		});
+
+		expect(formatGoalForTool(blocked)).toContain("Status: blocked");
+		expect(formatGoalForTool(blocked)).toContain("Blocked reason: Waiting on a product decision");
+	});
+
 	it("produces a snapshot tool response with no budget keys", () => {
 		const response = goalToolResponse(
 			testGoal({ status: "complete", tokensUsed: 3_250, timeUsedSeconds: 75, completedAt: 1_777_766_500 }),

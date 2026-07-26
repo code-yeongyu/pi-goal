@@ -18,6 +18,7 @@ describe("goal continuation policy", () => {
 	it("only auto-continues active goals after an agent turn", () => {
 		expect(shouldQueueGoalContinuationAfterAgentEnd(null, false)).toBe(false);
 		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "paused" }), false)).toBe(false);
+		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "blocked" }), false)).toBe(false);
 		expect(shouldQueueGoalContinuationAfterAgentEnd(testGoal({ status: "complete" }), false)).toBe(false);
 	});
 
@@ -25,6 +26,7 @@ describe("goal continuation policy", () => {
 		expect(shouldQueueGoalContinuationWhenIdle(testGoal({ status: "active" }), true, false)).toBe(true);
 		expect(shouldQueueGoalContinuationWhenIdle(testGoal({ status: "active" }), false, false)).toBe(false);
 		expect(shouldQueueGoalContinuationWhenIdle(testGoal({ status: "active" }), true, true)).toBe(false);
+		expect(shouldQueueGoalContinuationWhenIdle(testGoal({ status: "blocked" }), true, false)).toBe(false);
 	});
 });
 
