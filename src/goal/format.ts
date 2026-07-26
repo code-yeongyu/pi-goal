@@ -53,8 +53,9 @@ export function goalToolResponse(goal: Goal | null): GoalToolResponse {
 	return { goal: goal === null ? null : goalToolSnapshot(goal) };
 }
 
-export function formatGoalToolResponse(goal: Goal | null): string {
-	return JSON.stringify(goalToolResponse(goal), null, 2);
+export function formatGoalToolResponse(goal: Goal | null, notice?: string): string {
+	const response = JSON.stringify(goalToolResponse(goal), null, 2);
+	return notice === undefined ? response : `${response}\n${notice}`;
 }
 
 function goalToolSnapshot(goal: Goal): GoalToolSnapshot {

@@ -32,6 +32,18 @@ describe("goal store (budget-free)", () => {
 		expect(fileContents).not.toContain("budget");
 	});
 
+	it("spills a byte-identical oversized objective while storing marker-budget-aware text", async () => {
+		const ref = await tempStore("thread/oversized objective");
+		const objective = "x".repeat(4_200);
+
+		const goal = await createGoal(ref, objective);
+
+		const fullTextFilePath = join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.objective-full.txt`);
+		expect([...goal.objective].length).toBeLessThanOrEqual(4_000);
+		expect(goal.objective).toContain("[truncated; full objective:");
+		expect(await readFile(fullTextFilePath, "utf8")).toBe(objective);
+	});
+
 	it("replaces a completed goal and archives it as one history JSON line", async () => {
 		const ref = await tempStore("thread/complete-create");
 		const original = await createGoal(ref, "Original");

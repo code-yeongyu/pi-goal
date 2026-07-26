@@ -21,6 +21,14 @@ export function goalHistoryFilePath(ref: GoalStoreRef): string {
 	return join(ref.baseDir, `${encodedThreadId(ref)}.history.jsonl`);
 }
 
+export function objectiveFullTextFileName(ref: GoalStoreRef): string {
+	return `${encodedThreadId(ref)}.objective-full.txt`;
+}
+
+export function objectiveFullTextFilePath(ref: GoalStoreRef): string {
+	return join(ref.baseDir, objectiveFullTextFileName(ref));
+}
+
 export async function readGoal(ref: GoalStoreRef): Promise<Goal | null> {
 	const filePath = goalFilePath(ref);
 	try {
@@ -40,17 +48,18 @@ export async function writeGoal(ref: GoalStoreRef, goal: Goal | null): Promise<v
 }
 
 export async function createGoal(ref: GoalStoreRef, objective: string): Promise<Goal> {
-	const normalizedObjective = validateObjective(objective);
+	const validatedObjective = validateObjective(objective, objectiveFullTextFileName(ref));
 	const current = await readGoal(ref);
 	if (current !== null && current.status !== "complete") {
 		throw new GoalAlreadyExistsError("cannot create a new goal because this thread already has a goal");
 	}
+	if (validatedObjective.truncated) await writeFullObjectiveText(ref, objective);
 	if (current?.status === "complete") await archiveGoal(ref, current);
 	const now = nowSeconds();
 	const goal: Goal = {
 		id: randomUUID(),
 		threadId: ref.threadId,
-		objective: normalizedObjective,
+		objective: validatedObjective.objective,
 		status: "active",
 		tokensUsed: 0,
 		timeUsedSeconds: 0,
@@ -66,7 +75,10 @@ export async function updateGoal(ref: GoalStoreRef, update: GoalUpdate): Promise
 	const current = await readGoal(ref);
 	if (!current) throw new GoalNotFoundError("cannot update goal: no goal exists");
 
-	const objective = update.objective === undefined ? current.objective : validateObjective(update.objective);
+	const validatedObjective =
+		update.objective === undefined ? undefined : validateObjective(update.objective, objectiveFullTextFileName(ref));
+	const objective = validatedObjective?.objective ?? current.objective;
+	if (validatedObjective?.truncated) await writeFullObjectiveText(ref, update.objective ?? "");
 	const now = nowSeconds();
 	const hasObjectiveUpdate = update.objective !== undefined;
 	const replacesGoal = hasObjectiveUpdate && (objective !== current.objective || current.status === "complete");
@@ -118,6 +130,12 @@ export async function archiveGoal(ref: GoalStoreRef, goal: Goal): Promise<void> 
 	const filePath = goalHistoryFilePath(ref);
 	await mkdir(dirname(filePath), { recursive: true });
 	await appendFile(filePath, `${JSON.stringify(goal)}\n`, "utf8");
+}
+
+async function writeFullObjectiveText(ref: GoalStoreRef, objective: string): Promise<void> {
+	const filePath = objectiveFullTextFilePath(ref);
+	await mkdir(dirname(filePath), { recursive: true });
+	await writeFile(filePath, objective, "utf8");
 }
 
 export async function clearGoal(ref: GoalStoreRef): Promise<boolean> {

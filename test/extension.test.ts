@@ -153,6 +153,21 @@ describe("pi-goal extension tool behavior", () => {
 		expect((await readGoal(ref))?.status).toBe("complete");
 	});
 
+	it("creates an oversized goal with a full-text spill and truncation notice", async () => {
+		const harness = createHarness();
+		const ctx = await createContext("thread/oversized objective");
+		const ref = refForContext(ctx);
+		const objective = "x".repeat(4_200);
+
+		const result = await harness.tool("create_goal").execute("c1", { objective }, undefined, undefined, ctx);
+
+		expect(toolResultText(result)).toContain("Objective was truncated; full objective saved to");
+		expect((await readGoal(ref))?.objective).toContain("[truncated; full objective:");
+		expect(await readFile(join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.objective-full.txt`), "utf8")).toBe(
+			objective,
+		);
+	});
+
 	it("creates a new goal over a complete goal, archives it, and rejects unfinished goals", async () => {
 		const harness = createHarness();
 		const completeCtx = await createContext("thread/complete-create");

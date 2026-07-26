@@ -9,10 +9,18 @@ import { parseGoalCommand } from "./goal/command.js";
 import { shouldQueueGoalContinuationAfterAgentEnd, shouldQueueGoalContinuationWhenIdle } from "./goal/continuation.js";
 import { formatGoalForTool, formatGoalToolResponse, goalStatusLabel } from "./goal/format.js";
 import { buildContinuationPrompt } from "./goal/prompt.js";
-import { accountGoalUsage, clearGoal, createGoal, readGoal, updateGoal } from "./goal/store.js";
+import {
+	accountGoalUsage,
+	clearGoal,
+	createGoal,
+	objectiveFullTextFileName,
+	readGoal,
+	updateGoal,
+} from "./goal/store.js";
 import type { Goal, GoalAccountingMode, GoalStoreRef, TokenUsageSnapshot } from "./goal/types.js";
 import { COMPLETABLE_GOAL_STATUS_VALUES, isRecord } from "./goal/types.js";
 import { updateGoalUi } from "./goal/ui.js";
+import { objectiveTruncationNotice, validateObjective } from "./goal/validation.js";
 
 const GOAL_USAGE = "Usage: /goal <objective>";
 const GOAL_EMPTY_HINT = "No goal is currently set.";
@@ -61,10 +69,16 @@ export default function (pi: ExtensionAPI): void {
 					"cannot create a new goal because this thread already has an unfinished goal; use update_goal only when the existing goal is complete",
 				);
 			}
+			const validatedObjective = validateObjective(params.objective, objectiveFullTextFileName(ref));
 			const goal = await createGoal(ref, params.objective);
 			beginAgentGoalAccounting(goal);
 			updateGoalUi(ctx, goal);
-			return toolText(formatGoalToolResponse(goal));
+			return toolText(
+				formatGoalToolResponse(
+					goal,
+					validatedObjective.truncated ? objectiveTruncationNotice(objectiveFullTextFileName(ref)) : undefined,
+				),
+			);
 		},
 	});
 
