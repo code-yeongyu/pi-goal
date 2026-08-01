@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Raised the supported pi runtime baseline to `0.83.0` and Node.js to `22.19.0`.
+
 ## 0.3.0
 
 ### Breaking
