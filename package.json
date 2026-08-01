@@ -36,9 +36,9 @@
 		"check": "tsgo --noEmit && biome check . && npm run no-excuse"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*",
+		"@earendil-works/pi-ai": "^0.83.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0",
+		"@earendil-works/pi-tui": "^0.83.0",
 		"typebox": "*"
 	},
 	"devDependencies": {
@@ -49,6 +49,6 @@
 		"vitest": "^4.1.8"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.19.0"
 	}
 }
