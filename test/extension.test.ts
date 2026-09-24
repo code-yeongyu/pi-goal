@@ -433,31 +433,7 @@ describe("pi-goal extension accounting", () => {
 		expect(harness.sentMessages).toHaveLength(0);
 	});
 
-	it("resumes a blocked goal only for the agent start following a real user prompt", async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(0);
-		const harness = createHarness();
-		const ctx = await createContext("thread-user-resume");
-		await harness.tool("create_goal").execute("c1", { objective: "Finish the work" }, undefined, undefined, ctx);
-		await harness
-			.tool("update_goal")
-			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
-
-		await harness.emit("agent_start", { type: "agent_start" }, ctx);
-		expect((await readGoal(refForContext(ctx)))?.status).toBe("blocked");
-
-		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
-		await harness.emit("agent_start", { type: "agent_start" }, ctx);
-		vi.advanceTimersByTime(10_000);
-		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
-
-		const resumed = await readGoal(refForContext(ctx));
-		expect(resumed).toMatchObject({ status: "active", timeUsedSeconds: 10 });
-		expect(resumed).not.toHaveProperty("blockedReason");
-		expect(resumed).not.toHaveProperty("blockedAt");
-	});
-
-	it("resumes a blocked goal at before_agent_start even when admission rejects the run (no stale flag)", async () => {
+	it("does not resume a blocked goal when a user prompt is admission-rejected (issue #4)", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const harness = createHarness();
@@ -468,26 +444,87 @@ describe("pi-goal extension accounting", () => {
 			.execute("u1", { status: "blocked", reason: "Waiting on user input" }, undefined, undefined, ctx);
 
 		// Real user prompt fires before_agent_start, but the host's final provider admission
-		// rejects the run, so NO agent_start follows (no turn performed, no accounting begun).
-		// The resume must be bound to the user's before_agent_start, NOT deferred to a sticky
-		// flag that a later continuation-style agent_start could consume.
+		// rejects the run, so NO agent_start follows. A blocked goal must stay blocked rather
+		// than auto-resuming and leaking that state into a later continuation-style turn.
 		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
 
 		const afterRejectedPrompt = await readGoal(refForContext(ctx));
-		expect(afterRejectedPrompt).toMatchObject({ status: "active", timeUsedSeconds: 0 });
-		expect(afterRejectedPrompt).not.toHaveProperty("blockedReason");
-		expect(afterRejectedPrompt).not.toHaveProperty("blockedAt");
+		expect(afterRejectedPrompt).toMatchObject({
+			status: "blocked",
+			blockedReason: "Waiting on user input",
+			timeUsedSeconds: 0,
+		});
 
-		// A later continuation-style turn starts the agent WITHOUT a preceding before_agent_start.
-		// It must NOT perform a fresh resume transition; it only accounts its own turn against
-		// the already-active goal.
 		await harness.emit("agent_start", { type: "agent_start" }, ctx);
 		vi.advanceTimersByTime(5_000);
 		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
 
 		const afterContinuation = await readGoal(refForContext(ctx));
-		expect(afterContinuation).toMatchObject({ status: "active", timeUsedSeconds: 5 });
-		expect(afterContinuation).not.toHaveProperty("blockedReason");
+		expect(afterContinuation).toMatchObject({
+			status: "blocked",
+			blockedReason: "Waiting on user input",
+			timeUsedSeconds: 0,
+		});
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("does not auto-resume a blocked goal on an unrelated real user prompt (issue #4)", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const harness = createHarness();
+		const ctx = await createContext("thread-blocked-stays-blocked");
+		await harness
+			.tool("create_goal")
+			.execute("c1", { objective: "Ship an inferred objective" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute(
+				"u1",
+				{ status: "blocked", reason: "The objective conflicts with the authoritative requirements" },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await harness.emit("agent_start", { type: "agent_start" }, ctx);
+		vi.advanceTimersByTime(8_000);
+		await harness.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+
+		const goal = await readGoal(refForContext(ctx));
+		expect(goal).toMatchObject({
+			status: "blocked",
+			blockedReason: "The objective conflicts with the authoritative requirements",
+			timeUsedSeconds: 0,
+		});
+		expect(harness.sentMessages).toHaveLength(0);
+	});
+
+	it("resumes a blocked goal only after explicit /goal resume and queues one continuation (issue #4)", async () => {
+		const harness = createHarness();
+		const ui = createMockUi();
+		const ctx = await createContext("thread-explicit-resume", { hasUI: true, ui });
+		await harness
+			.tool("create_goal")
+			.execute("c1", { objective: "Ship an inferred objective" }, undefined, undefined, ctx);
+		await harness
+			.tool("update_goal")
+			.execute("u1", { status: "blocked", reason: "Waiting on a product decision" }, undefined, undefined, ctx);
+
+		await harness.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		expect((await readGoal(refForContext(ctx)))?.status).toBe("blocked");
+		expect(harness.sentMessages).toHaveLength(0);
+
+		await harness.command("goal").handler("resume", ctx);
+
+		const resumed = await readGoal(refForContext(ctx));
+		expect(resumed).toMatchObject({ status: "active", objective: "Ship an inferred objective" });
+		expect(resumed).not.toHaveProperty("blockedReason");
+		expect(resumed).not.toHaveProperty("blockedAt");
+		expect(harness.sentMessages).toHaveLength(1);
+		expect(harness.sentMessages[0]?.message.customType).toBe("pi-goal-continuation");
+		expect(harness.sentMessages[0]?.message.content).toContain("untrusted goal data");
+		expect(harness.sentMessages[0]?.message.content).not.toContain("user-provided data");
 	});
 
 	it("does not resume a blocked goal on a continuation-style agent_start with no preceding before_agent_start", async () => {
@@ -757,6 +794,7 @@ function createExtensionApi(
 			const eventHandlers = handlers.get(event) ?? [];
 			eventHandlers.push((payload, ctx) => handler(payload as never, ctx as never));
 			handlers.set(event, eventHandlers);
+			return () => {};
 		},
 		registerTool(tool) {
 			tools.set(tool.name, {
@@ -781,6 +819,7 @@ function createExtensionApi(
 			return undefined;
 		},
 		registerMessageRenderer() {},
+		registerMarkdownTransformer() {},
 		registerEntryRenderer() {},
 		sendMessage(message, options) {
 			sentMessages.push({
