@@ -3,7 +3,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import process from "node:process";
-import ts from "typescript";
+import { LanguageVariant, SyntaxKind } from "typescript/unstable/ast";
+import { createScanner } from "typescript/unstable/ast/scanner";
 
 type RuleId = "no-any-assertion" | "no-unknown-assertion" | "no-ts-ignore" | "no-ts-expect-error" | "no-enum";
 
@@ -73,133 +74,125 @@ function walkPath(currentPath: string, discoveredFiles: Set<string>): void {
 	}
 }
 
-function getScriptKind(filePath: string): ts.ScriptKind {
-	const extension = extname(filePath).toLowerCase();
-
-	switch (extension) {
-		case ".tsx":
-			return ts.ScriptKind.TSX;
-		case ".jsx":
-		case ".js":
-		case ".mjs":
-		case ".cjs":
-			return ts.ScriptKind.JS;
-		default:
-			return ts.ScriptKind.TS;
+function positionToLineColumn(text: string, pos: number): { line: number; column: number } {
+	let line = 1;
+	let lastBreak = -1;
+	for (let i = 0; i < pos; i++) {
+		if (text.charCodeAt(i) === 10) {
+			line += 1;
+			lastBreak = i;
+		}
 	}
+	return { line, column: pos - lastBreak };
 }
 
-function createViolation(sourceFile: ts.SourceFile, start: number, ruleId: RuleId, message: string): Violation {
-	const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
-
-	return {
-		ruleId,
-		filePath: sourceFile.fileName,
-		line: line + 1,
-		column: character + 1,
-		message,
-	};
+function createViolation(filePath: string, text: string, start: number, ruleId: RuleId, message: string): Violation {
+	const { line, column } = positionToLineColumn(text, start);
+	return { ruleId, filePath, line, column, message };
 }
 
-function getTypeAssertionKeywordKind(typeNode: ts.TypeNode): ts.SyntaxKind | null {
-	if (ts.isParenthesizedTypeNode(typeNode)) return getTypeAssertionKeywordKind(typeNode.type);
-	if (typeNode.kind === ts.SyntaxKind.AnyKeyword || typeNode.kind === ts.SyntaxKind.UnknownKeyword) {
-		return typeNode.kind;
-	}
-	return null;
+function isTrivia(kind: number): boolean {
+	return (
+		kind === SyntaxKind.WhitespaceTrivia ||
+		kind === SyntaxKind.NewLineTrivia ||
+		kind === SyntaxKind.SingleLineCommentTrivia ||
+		kind === SyntaxKind.MultiLineCommentTrivia ||
+		kind === SyntaxKind.ConflictMarkerTrivia
+	);
 }
 
-function findNodeViolations(sourceFile: ts.SourceFile): Violation[] {
+function analyzeFile(filePath: string): Violation[] {
+	const fileText = readFileSync(filePath, "utf8");
+	const scanner = createScanner(false, LanguageVariant.Standard, fileText);
 	const violations: Violation[] = [];
+	let awaitingAssertionKeyword = false;
+	let assertionOpenParens = 0;
 
-	function visit(node: ts.Node): void {
-		if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
-			const keywordKind = getTypeAssertionKeywordKind(node.type);
-
-			if (keywordKind === ts.SyntaxKind.AnyKeyword) {
+	for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+		if (token === SyntaxKind.SingleLineCommentTrivia || token === SyntaxKind.MultiLineCommentTrivia) {
+			const commentText = scanner.getTokenText();
+			const tokenPosition = scanner.getTokenStart();
+			if (commentText.includes("@ts-ignore")) {
 				violations.push(
 					createViolation(
-						sourceFile,
-						node.type.getStart(sourceFile),
+						filePath,
+						fileText,
+						tokenPosition,
+						"no-ts-ignore",
+						"Remove `@ts-ignore` and fix the underlying type error.",
+					),
+				);
+			}
+			if (commentText.includes("@ts-expect-error")) {
+				violations.push(
+					createViolation(
+						filePath,
+						fileText,
+						tokenPosition,
+						"no-ts-expect-error",
+						"Remove `@ts-expect-error` and fix the underlying type error.",
+					),
+				);
+			}
+			continue;
+		}
+
+		if (isTrivia(token)) continue;
+
+		if (token === SyntaxKind.AsKeyword) {
+			awaitingAssertionKeyword = true;
+			assertionOpenParens = 0;
+			continue;
+		}
+
+		if (awaitingAssertionKeyword) {
+			if (token === SyntaxKind.OpenParenToken) {
+				assertionOpenParens += 1;
+				continue;
+			}
+			if (token === SyntaxKind.CloseParenToken && assertionOpenParens > 0) {
+				assertionOpenParens -= 1;
+				continue;
+			}
+			if (token === SyntaxKind.AnyKeyword) {
+				violations.push(
+					createViolation(
+						filePath,
+						fileText,
+						scanner.getTokenStart(),
 						"no-any-assertion",
 						"Replace this assertion with real narrowing or validation.",
 					),
 				);
-			}
-
-			if (keywordKind === ts.SyntaxKind.UnknownKeyword) {
+			} else if (token === SyntaxKind.UnknownKeyword) {
 				violations.push(
 					createViolation(
-						sourceFile,
-						node.type.getStart(sourceFile),
+						filePath,
+						fileText,
+						scanner.getTokenStart(),
 						"no-unknown-assertion",
 						"Do not use `unknown` as an assertion target. Narrow the value instead.",
 					),
 				);
 			}
+			awaitingAssertionKeyword = false;
+			assertionOpenParens = 0;
 		}
 
-		if (ts.isEnumDeclaration(node)) {
+		if (token === SyntaxKind.EnumKeyword) {
 			violations.push(
 				createViolation(
-					sourceFile,
-					node.name.getStart(sourceFile),
+					filePath,
+					fileText,
+					scanner.getTokenStart(),
 					"no-enum",
 					"Replace enum with a literal union or discriminated union.",
 				),
 			);
 		}
-
-		ts.forEachChild(node, visit);
-	}
-
-	visit(sourceFile);
-	return violations;
-}
-
-function findCommentViolations(sourceFile: ts.SourceFile): Violation[] {
-	const violations: Violation[] = [];
-	const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, sourceFile.text);
-
-	for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
-		if (token !== ts.SyntaxKind.SingleLineCommentTrivia && token !== ts.SyntaxKind.MultiLineCommentTrivia) {
-			continue;
-		}
-
-		const commentText = scanner.getTokenText();
-		const tokenPosition = scanner.getTokenPos();
-
-		if (commentText.includes("@ts-ignore")) {
-			violations.push(
-				createViolation(
-					sourceFile,
-					tokenPosition,
-					"no-ts-ignore",
-					"Remove `@ts-ignore` and fix the underlying type error.",
-				),
-			);
-		}
-
-		if (commentText.includes("@ts-expect-error")) {
-			violations.push(
-				createViolation(
-					sourceFile,
-					tokenPosition,
-					"no-ts-expect-error",
-					"Remove `@ts-expect-error` and fix the underlying type error.",
-				),
-			);
-		}
 	}
 
 	return violations;
-}
-
-function analyzeFile(filePath: string): Violation[] {
-	const fileText = readFileSync(filePath, "utf8");
-	const sourceFile = ts.createSourceFile(filePath, fileText, ts.ScriptTarget.Latest, true, getScriptKind(filePath));
-
-	return [...findNodeViolations(sourceFile), ...findCommentViolations(sourceFile)];
 }
 
 function formatViolation(violation: Violation): string {

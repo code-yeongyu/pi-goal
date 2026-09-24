@@ -45,19 +45,25 @@ On session start, after `/goal <objective>`, after `/goal resume`, and after eve
 
 Use `update_goal` with `status: "blocked"` only after the same blocking condition has recurred for at least three consecutive goal turns. A resumed goal starts a fresh audit; do not block a goal merely because work is hard, slow, or uncertain.
 
-If an active turn ends with `ctx.signal.aborted`, pi-goal records `user interrupted the turn` and suppresses continuation. The next real user prompt resumes that blocked goal before accounting starts; goal-continuation messages do not resume it. The published extension API exposes no abort source, so this `ctx.signal` heuristic cannot distinguish user-initiated aborts from system aborts and may label a non-user abort as `user interrupted the turn`. Follow-up: upstream an `aborted` flag and abort-source field in the published extension API.
+If an active turn ends with `ctx.signal.aborted`, pi-goal records `user interrupted the turn` and suppresses continuation. A blocked goal stays blocked until the user explicitly `/goal resume`s, replaces, or clears it. Unrelated user prompts and goal-continuation messages do not resume it. Continuation prompts label the objective as untrusted goal data rather than user-provided data, because `create_goal` may store a model-inferred objective. The published extension API exposes no abort source, so this `ctx.signal` heuristic cannot distinguish user-initiated aborts from system aborts and may label a non-user abort as `user interrupted the turn`. Follow-up: upstream an `aborted` flag and abort-source field in the published extension API.
 
 ## Development
 
 ```bash
-npm test
-npm run typecheck
-npm run check
-npm run no-excuse
+bun install
+bun run check
+bun run test
 npm pack --dry-run
 ```
 
-The implementation is strict TypeScript and mirrors sibling pi extension metadata, CI, and package layout. `npm run check` runs `tsgo --noEmit`, `biome check .`, and the TypeScript no-excuse checker.
+Consumers that install with npm can still use the lockfile:
+
+```bash
+npm ci
+npm test
+```
+
+The implementation is strict TypeScript and mirrors sibling pi extension metadata, CI, and package layout. `bun run check` runs `tsgo --noEmit`, `biome check .`, and the TypeScript no-excuse checker.
 
 ## Related
 

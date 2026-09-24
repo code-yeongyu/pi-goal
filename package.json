@@ -1,6 +1,6 @@
 {
 	"name": "pi-goal",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"description": "Persistent goal tracking for pi-coding-agent with Codex-style goal tools, TUI footer, and continuation prompts.",
 	"type": "module",
 	"license": "MIT",
@@ -33,7 +33,7 @@
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"no-excuse": "bun --install=fallback ./scripts/check-no-excuse-rules.ts src test scripts",
-		"check": "tsgo --noEmit && biome check . && npm run no-excuse"
+		"check": "tsgo --noEmit && biome check . && bun run no-excuse"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-ai": "*",
@@ -42,13 +42,17 @@
 		"typebox": "*"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.5",
-		"@types/node": "^25.9.2",
-		"@typescript/native-preview": "^7.0.0-dev.20260610.1",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@biomejs/biome": "2.5.14",
+		"@earendil-works/pi-ai": "0.87.1",
+		"@earendil-works/pi-coding-agent": "0.87.1",
+		"@earendil-works/pi-tui": "0.87.1",
+		"@types/node": "26.6.2",
+		"@typescript/native-preview": "7.0.0-dev.20260707.2",
+		"@vitest/coverage-v8": "5.0.1",
+		"typescript": "7.0.2",
+		"vitest": "5.0.1"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.19.0"
 	}
 }
