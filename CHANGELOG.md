@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- CI uses Bun 1.4.4 (was 1.4.2).
+
 ## 0.3.1
 
 ### Fixed
